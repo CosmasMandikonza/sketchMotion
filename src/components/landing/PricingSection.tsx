@@ -12,27 +12,29 @@ import {
 
 const plans = [
   {
-    name: "Free",
+    name: "Starter",
     price: "$0",
     period: "forever",
-    description: "Perfect for trying out SketchMotion",
+    description: "Kick the tires. No credit card, no tricks.",
     icon: PricingSoloIcon,
     color: "from-sm-pink to-sm-coral",
     features: [
-      "5 projects",
-      "720p exports",
-      "Basic AI polish",
-      "Community support",
-      "Watermarked exports",
+      "5 projects (plenty to start)",
+      "720p exports (good for socials)",
+      "AI polish included",
+      "No credit card required",
+      "Small watermark",
     ],
-    cta: "Get Started",
+    cta: "Start Free",
     popular: false,
+    founding: false,
   },
   {
-    name: "Pro",
-    price: "$19",
-    period: "/month",
-    description: "For serious creators and small teams",
+    name: "Founding Pro",
+    price: "$12",
+    originalPrice: "$19",
+    period: "/mo forever",
+    description: "For creators who ship. First 500 only.",
     icon: PricingTeamIcon,
     color: "from-sm-magenta to-sm-pink",
     features: [
@@ -44,14 +46,16 @@ const plans = [
       "Custom styles",
       "Version history",
     ],
-    cta: "Start Free Trial",
+    cta: "Claim Founding Price",
     popular: true,
+    founding: true,
   },
   {
-    name: "Team",
-    price: "$49",
-    period: "/month",
-    description: "For studios and larger teams",
+    name: "Founding Team",
+    price: "$29",
+    originalPrice: "$49",
+    period: "/mo forever",
+    description: "For studios ready to scale. First 100 only.",
     icon: PricingStudioIcon,
     color: "from-sm-purple to-sm-soft-purple",
     features: [
@@ -63,8 +67,9 @@ const plans = [
       "Custom branding",
       "Dedicated support",
     ],
-    cta: "Contact Sales",
+    cta: "Claim Founding Price",
     popular: false,
+    founding: true,
   },
 ];
 
@@ -97,14 +102,14 @@ export function PricingSection() {
         >
           <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 mb-6">
             <PricingSoloIcon className="w-4 h-4" />
-            <span className="text-sm font-medium text-white">Simple Pricing</span>
+            <span className="text-sm font-medium text-white">🎁 Founding Member Pricing</span>
           </div>
           <h2 className="font-display font-bold text-4xl md:text-5xl text-white mb-4">
-            Choose Your{" "}
-            <span className="gradient-text">Plan</span>
+            Lock in{" "}
+            <span className="gradient-text">early access rates</span>
           </h2>
           <p className="text-xl text-white/70 max-w-2xl mx-auto">
-            Start free and scale as you grow. No hidden fees, cancel anytime.
+            First 500 members get lifetime discounts. Prices go up at launch.
           </p>
         </motion.div>
 

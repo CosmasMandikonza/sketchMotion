@@ -131,9 +131,9 @@ export function FeaturesSection() {
           <GlassCard className="p-8 md:p-12">
             <div className="text-center mb-10">
               <h3 className="font-display font-bold text-2xl md:text-3xl text-white mb-2">
-                Simple 3-Step Workflow
+                Napkin to Netflix-ready in 3 steps
               </h3>
-              <p className="text-white/70">From idea to animation in minutes</p>
+              <p className="text-white/70">No tutorials required. No steep learning curve. Just draw, polish, export.</p>
             </div>
 
             <div className="grid md:grid-cols-3 gap-8">
@@ -147,9 +147,9 @@ export function FeaturesSection() {
                     1
                   </div>
                 </div>
-                <h4 className="font-display font-bold text-lg text-white mb-2">Sketch</h4>
+                <h4 className="font-display font-bold text-lg text-white mb-2">Sketch or upload</h4>
                 <p className="text-white/60 text-sm">
-                  Draw your frames or upload images. Connect them to define your sequence.
+                  Drop your rough drawings onto the canvas. Doesn't matter if they're ugly. <span className="text-white/40">(30 seconds)</span>
                 </p>
               </div>
 
@@ -170,9 +170,9 @@ export function FeaturesSection() {
                     2
                   </div>
                 </div>
-                <h4 className="font-display font-bold text-lg text-white mb-2">Polish</h4>
+                <h4 className="font-display font-bold text-lg text-white mb-2">AI polishes</h4>
                 <p className="text-white/60 text-sm">
-                  AI enhances your artwork with consistent style and professional quality.
+                  One click. Your sketches get the studio treatment — with <em>your</em> style intact. <span className="text-white/40">(Instant)</span>
                 </p>
               </div>
 
@@ -186,9 +186,9 @@ export function FeaturesSection() {
                     3
                   </div>
                 </div>
-                <h4 className="font-display font-bold text-lg text-white mb-2">Animate</h4>
+                <h4 className="font-display font-bold text-lg text-white mb-2">Export video</h4>
                 <p className="text-white/60 text-sm">
-                  Generate smooth animations and export your video in seconds.
+                  Smooth motion, cinematic transitions. Download or share with a link. <span className="text-white/40">(Under 60 seconds)</span>
                 </p>
               </div>
             </div>
