@@ -10,23 +10,23 @@ import {
 const benefits = [
   {
     icon: BenefitSpeedIcon,
-    heading: "Ship storyboards 3× faster",
-    description: "Go from rough sketch to polished sequence in minutes, not days. AI handles the tedious cleanup so you can focus on storytelling."
+    heading: "Cut 80% of busywork",
+    description: "Stop pushing pixels. AI handles cleanup while you focus on the story. What took days now takes minutes."
   },
   {
     icon: BenefitConsistencyIcon,
-    heading: "Keep style consistent across scenes",
-    description: "Our AI learns your visual style and applies it uniformly, ensuring every frame feels cohesive from start to finish."
+    heading: "No more style drift",
+    description: "Frame 1 matches Frame 50. AI learns your look and keeps it locked — no more jarring inconsistencies."
   },
   {
     icon: CollaborationIcon,
-    heading: "Collaborate live with your team",
-    description: "Work together in real-time with PMs, designers, and stakeholders. See live cursors, leave comments, and iterate faster."
+    heading: "Kill the feedback loop",
+    description: "Live cursors. Inline comments. No more \"see attachment v7_final_FINAL.mp4\" in your inbox."
   },
   {
     icon: ExportIcon,
-    heading: "Export ready-to-share animations",
-    description: "Generate polished MP4s, GIFs, or WebMs in minutes. Share instantly with clients or publish directly to your channels."
+    heading: "From canvas to client in 60 seconds",
+    description: "Export. Share. Get paid. Repeat. Your clients get polished video, you keep your sanity."
   }
 ];
 
@@ -50,7 +50,7 @@ export function TestimonialsSection() {
     <section id="testimonials" className="py-20 px-4 scroll-mt-24">
       <div className="max-w-6xl mx-auto">
         {/* Section Header */}
-        <motion.div 
+        <motion.div
           className="text-center mb-14"
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
@@ -59,14 +59,14 @@ export function TestimonialsSection() {
         >
           <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 mb-6">
             <BenefitSpeedIcon className="w-4 h-4" />
-            <span className="text-sm font-medium text-white">Why Creators Choose Us</span>
+            <span className="text-sm font-medium text-white">⚡ Built Different</span>
           </div>
           <h2 className="font-display font-bold text-4xl md:text-5xl text-white mb-4">
-            Built for fast,{" "}
-            <span className="gradient-text">controllable</span> animation
+            Why settle for{" "}
+            <span className="gradient-text">slow?</span>
           </h2>
           <p className="text-xl text-white/70 max-w-2xl mx-auto">
-            Everything you need to turn rough ideas into polished motion—without the steep learning curve.
+            Other tools make you choose: fast <em>or</em> good. We said no.
           </p>
         </motion.div>
 
