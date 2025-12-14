@@ -240,14 +240,14 @@ export function HeroSection() {
             </div>
             
             {/* Badge */}
-            <motion.div 
+            <motion.div
               className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 mb-6"
               initial={{ opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
               transition={{ delay: 0.2 }}
             >
               <Sparkles className="w-4 h-4 text-sm-magenta" />
-              <span className="text-sm font-medium text-white">AI-Powered Animation</span>
+              <span className="text-sm font-medium text-white">🚀 Early Access — Launching Soon</span>
             </motion.div>
 
             {/* Headline with mascot on desktop */}
@@ -256,59 +256,48 @@ export function HeroSection() {
                 <DancingMascot />
               </div>
               <h1 className="font-display font-extrabold text-5xl md:text-6xl lg:text-7xl text-white leading-tight mb-6">
-                From Sketch to{" "}
+                Sketch it.{" "}
                 <span className="gradient-text bg-gradient-to-r from-white via-sm-pink to-white">
-                  Motion
-                </span>{" "}
-                in Minutes
+                  Ship it.
+                </span>
               </h1>
             </div>
 
             {/* Subheadline */}
             <p className="text-xl text-white/80 mb-8 max-w-xl mx-auto lg:mx-0">
-              The collaborative storyboard-to-video platform. Sketch your ideas, 
-              let AI polish your art, and generate stunning animations — all in one place.
+              Stop waiting weeks for polished animations. SketchMotion turns your rough
+              storyboards into production-ready video — in minutes, not months. Your style, amplified by AI.
             </p>
 
             {/* CTA Buttons */}
             <div className="flex flex-col sm:flex-row gap-4 justify-center lg:justify-start">
               <Link to="/dashboard">
-                <Button 
+                <Button
                   size="lg"
                   className="bg-sm-magenta hover:bg-sm-magenta/90 text-white font-bold text-lg px-8 py-6 shadow-glow hover:shadow-glow-lg transition-all btn-press group"
                 >
-                  Start Creating Free
+                  Join the Waitlist
                   <ArrowRight className="w-5 h-5 ml-2 group-hover:translate-x-1 transition-transform" />
                 </Button>
               </Link>
-              <Button 
+              <Button
                 size="lg"
                 variant="outline"
                 className="border-white/30 bg-white/5 text-white hover:bg-white/10 hover:text-white font-semibold text-lg px-8 py-6"
               >
                 <Play className="w-5 h-5 mr-2" />
-                Watch Demo
+                Watch 60s Demo
               </Button>
             </div>
 
-            {/* Social Proof */}
-            <div className="mt-10 flex items-center gap-4 justify-center lg:justify-start">
-              <div className="flex -space-x-3">
-                {[1, 2, 3, 4, 5].map((i) => (
-                  <div 
-                    key={i}
-                    className="w-10 h-10 rounded-full border-2 border-white/30 bg-gradient-to-br from-sm-pink to-sm-purple"
-                    style={{
-                      backgroundImage: `url(https://images.unsplash.com/photo-${1500000000000 + i * 100000}?w=80&q=80)`,
-                      backgroundSize: 'cover'
-                    }}
-                  />
-                ))}
+            {/* Origin Story - Pre-launch social proof */}
+            <div className="mt-10 flex items-center gap-3 justify-center lg:justify-start">
+              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-sm-pink to-sm-purple flex items-center justify-center">
+                <Wand2 className="w-5 h-5 text-white" />
               </div>
-              <div className="text-left">
-                <p className="text-white font-semibold">10,000+ creators</p>
-                <p className="text-white/60 text-sm">already animating</p>
-              </div>
+              <p className="text-white/70 text-sm">
+                Built by animators tired of the After Effects grind.
+              </p>
             </div>
           </motion.div>
 

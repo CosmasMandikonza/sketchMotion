@@ -13,38 +13,38 @@ import {
 const features = [
   {
     icon: StoryboardIcon,
-    title: "Infinite Canvas",
-    description: "Sketch freely on an endless workspace. Create frames, connect them with arrows, and build your story visually.",
+    title: "Never run out of room",
+    description: "Drop sketches anywhere. Connect frames with a click. Your storyboard grows with your story.",
     color: "from-sm-pink to-sm-coral"
   },
   {
     icon: AIPolishIcon,
-    title: "AI Polish",
-    description: "Transform rough sketches into polished artwork. Our AI applies consistent styles while preserving your creative intent.",
+    title: "Your style, elevated",
+    description: "Rough lines become clean frames. AI learns your look — not some generic filter.",
     color: "from-sm-soft-purple to-sm-purple"
   },
   {
     icon: AnimationIcon,
-    title: "AI Animation",
-    description: "Generate smooth animations from your storyboard sequences. Watch your static frames come to life in seconds.",
+    title: "Hit play, get video",
+    description: "One click turns static frames into smooth, cinematic motion. 5 seconds, not 5 hours.",
     color: "from-sm-magenta to-sm-pink"
   },
   {
     icon: CollaborationIcon,
-    title: "Real-time Collaboration",
-    description: "Work together with your team. See live cursors, leave comments, and iterate faster than ever.",
+    title: "Iterate with your team, live",
+    description: "See cursors move. Drop comments. Ship faster with everyone in the same canvas.",
     color: "from-sm-mint to-sm-soft-purple"
   },
   {
     icon: VersionHistoryIcon,
-    title: "Version History",
-    description: "Never lose your work. Track every change, compare versions, and restore previous states instantly.",
+    title: "Undo anything, anytime",
+    description: "Every version saved. Compare. Restore. Sleep easy.",
     color: "from-sm-coral to-sm-pink"
   },
   {
     icon: ExportIcon,
-    title: "Easy Export & Share",
-    description: "Export to MP4, GIF, or WebM. Generate shareable links with optional password protection.",
+    title: "One-click delivery",
+    description: "Export 4K MP4, GIF, or WebM. Share with a link. Password-protect if you're paranoid.",
     color: "from-sm-purple to-sm-magenta"
   }
 ];
@@ -69,7 +69,7 @@ export function FeaturesSection() {
     <section id="features" className="py-24 px-4 scroll-mt-24">
       <div className="max-w-7xl mx-auto">
         {/* Section Header */}
-        <motion.div 
+        <motion.div
           className="text-center mb-16"
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
@@ -78,15 +78,14 @@ export function FeaturesSection() {
         >
           <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 mb-6">
             <BenefitWorkflowIcon className="w-4 h-4" />
-            <span className="text-sm font-medium text-white">Powerful Features</span>
+            <span className="text-sm font-medium text-white">✨ Your New Animation Stack</span>
           </div>
           <h2 className="font-display font-bold text-4xl md:text-5xl text-white mb-4">
-            Everything You Need to{" "}
-            <span className="gradient-text">Animate</span>
+            Less grind.{" "}
+            <span className="gradient-text">More creating.</span>
           </h2>
           <p className="text-xl text-white/70 max-w-2xl mx-auto">
-            From initial sketch to final export, SketchMotion provides all the tools 
-            you need to bring your stories to life.
+            Every tool you need to go from napkin sketch to shareable video — without the 47-tab workflow.
           </p>
         </motion.div>
 
