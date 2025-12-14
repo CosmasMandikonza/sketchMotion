@@ -151,6 +151,11 @@ export function PricingSection() {
 
                 {/* Price */}
                 <div className="mb-6">
+                  {plan.originalPrice && (
+                    <span className="text-white/40 line-through text-lg mr-2">
+                      {plan.originalPrice}
+                    </span>
+                  )}
                   <span className="font-display font-bold text-4xl text-white">
                     {plan.price}
                   </span>
