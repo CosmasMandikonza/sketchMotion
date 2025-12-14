@@ -604,3 +604,321 @@ export async function generateStoryboardVideo(
     prompt: promptResult.masterPrompt,
   };
 }
+
+// ============================================================================
+// AI Creative Director Functions
+// ============================================================================
+
+/**
+ * Director configuration type matching the UI options
+ */
+export interface DirectorConfig {
+  mood: string | null;
+  pacing: 'Slow' | 'Medium' | 'Fast';
+  camera: string | null;
+  lens: string | null;
+  lighting: string | null;
+  colorGrade: string | null;
+  motionIntensity: number; // 0-100
+  continuityStrictness: number; // 0-100
+  noGoList: string[];
+}
+
+/**
+ * Generate a professional Director's Treatment document
+ * Analyzes frames with director settings to create a cinematic treatment
+ */
+export async function generateDirectorsTreatment(
+  frames: Array<{
+    title: string;
+    imageUrl: string;
+    durationMs: number;
+    motionNotes?: string;
+    order: number;
+  }>,
+  style: 'Cinematic' | 'Animated' | 'Realistic' | 'Stylized',
+  directorConfig: DirectorConfig
+): Promise<string> {
+  if (!ai) {
+    throw new Error("Google AI not configured. Add VITE_GEMINI_API_KEY to .env");
+  }
+
+  if (frames.length === 0) {
+    return "No frames available for treatment generation.";
+  }
+
+  // Build content with frame images
+  const parts: Array<{ text: string } | { inlineData: { data: string; mimeType: string } }> = [];
+
+  const totalDuration = frames.reduce((acc, f) => acc + (f.durationMs || 2000), 0) / 1000;
+  const frameDescriptions = frames.map((f, i) =>
+    `Frame ${i + 1}: "${f.title}" (${(f.durationMs || 2000) / 1000}s)${f.motionNotes ? ` — Motion: ${f.motionNotes}` : ''}`
+  ).join('\n');
+
+  const configSummary = [
+    directorConfig.mood ? `Mood: ${directorConfig.mood}` : null,
+    `Pacing: ${directorConfig.pacing}`,
+    directorConfig.camera ? `Camera: ${directorConfig.camera}` : null,
+    directorConfig.lens ? `Lens: ${directorConfig.lens}` : null,
+    directorConfig.lighting ? `Lighting: ${directorConfig.lighting}` : null,
+    directorConfig.colorGrade ? `Color Grade: ${directorConfig.colorGrade}` : null,
+    `Motion Intensity: ${directorConfig.motionIntensity}%`,
+    `Continuity Strictness: ${directorConfig.continuityStrictness}%`,
+    directorConfig.noGoList.length > 0 ? `Avoid: ${directorConfig.noGoList.join(', ')}` : null,
+  ].filter(Boolean).join('\n');
+
+  parts.push({
+    text: `You are an award-winning film director creating a Director's Treatment document for a ${totalDuration.toFixed(1)}-second ${style.toLowerCase()} video project.
+
+STORYBOARD FRAMES:
+${frameDescriptions}
+
+DIRECTOR'S VISION:
+${configSummary}
+
+STYLE: ${style}
+
+Analyze the storyboard frames visually and write a professional Director's Treatment that includes:
+
+1. PROJECT OVERVIEW - A compelling one-paragraph summary of the visual story
+2. VISUAL APPROACH - Describe the cinematography philosophy based on the director's settings
+3. LIGHTING DIRECTION - How light will be used (informed by the lighting setting)
+4. COLOR PHILOSOPHY - The color grading approach and emotional impact
+5. NARRATIVE ARC - How each frame contributes to the story progression
+6. PACING & RHYTHM - Edit rhythm based on the pacing setting
+7. MOTION PHILOSOPHY - Camera movement approach (${directorConfig.motionIntensity}% intensity)
+8. CONTINUITY NOTES - Rules for visual consistency (${directorConfig.continuityStrictness}% strictness)
+${directorConfig.noGoList.length > 0 ? `9. RESTRICTIONS - Elements to avoid: ${directorConfig.noGoList.join(', ')}` : ''}
+
+Format as a professional treatment document with clear section headers.
+End with the signature line: "Make it feel directed, not generated."
+
+Output ONLY the treatment text, no explanations or markdown code blocks.`
+  });
+
+  // Add frame images for visual analysis
+  for (const frame of frames.slice(0, 6)) { // Limit to 6 frames for API limits
+    if (frame.imageUrl) {
+      try {
+        const base64 = await imageUrlToBase64(frame.imageUrl);
+        parts.push({
+          inlineData: {
+            data: base64.replace(/^data:image\/\w+;base64,/, ""),
+            mimeType: "image/png",
+          },
+        });
+      } catch (e) {
+        console.warn(`Failed to load frame image for treatment: ${e}`);
+      }
+    }
+  }
+
+  const response = await ai.models.generateContent({
+    model: "gemini-2.0-flash",
+    contents: [{ role: "user", parts }],
+  });
+
+  return response.text?.trim() || "Failed to generate treatment.";
+}
+
+/**
+ * Generate a professional Shot List document
+ * Creates detailed shot-by-shot breakdown with technical specifications
+ */
+export async function generateShotList(
+  frames: Array<{
+    title: string;
+    imageUrl: string;
+    durationMs: number;
+    motionNotes?: string;
+    order: number;
+  }>,
+  style: 'Cinematic' | 'Animated' | 'Realistic' | 'Stylized',
+  directorConfig: DirectorConfig
+): Promise<string> {
+  if (!ai) {
+    throw new Error("Google AI not configured. Add VITE_GEMINI_API_KEY to .env");
+  }
+
+  if (frames.length === 0) {
+    return "No frames available for shot list generation.";
+  }
+
+  // Build content with frame images
+  const parts: Array<{ text: string } | { inlineData: { data: string; mimeType: string } }> = [];
+
+  const totalDuration = frames.reduce((acc, f) => acc + (f.durationMs || 2000), 0) / 1000;
+  const frameDescriptions = frames.map((f, i) =>
+    `Frame ${i + 1}: "${f.title}" (${(f.durationMs || 2000) / 1000}s)${f.motionNotes ? ` — Motion: ${f.motionNotes}` : ''}`
+  ).join('\n');
+
+  const configSummary = [
+    directorConfig.camera ? `Camera Style: ${directorConfig.camera}` : 'Camera: Director\'s choice',
+    directorConfig.lens ? `Lens: ${directorConfig.lens}` : 'Lens: Varies by shot',
+    directorConfig.lighting ? `Lighting: ${directorConfig.lighting}` : 'Lighting: Natural',
+    directorConfig.colorGrade ? `Color Grade: ${directorConfig.colorGrade}` : 'Color: Natural',
+    `Motion Intensity: ${directorConfig.motionIntensity}%`,
+  ].join('\n');
+
+  parts.push({
+    text: `You are a professional 1st AD (Assistant Director) creating a detailed Shot List for a ${totalDuration.toFixed(1)}-second ${style.toLowerCase()} video production.
+
+STORYBOARD FRAMES:
+${frameDescriptions}
+
+TECHNICAL PARAMETERS:
+${configSummary}
+
+Analyze each storyboard frame visually and create a professional shot list with:
+
+HEADER:
+- Total Shots: ${frames.length}
+- Total Duration: ${totalDuration.toFixed(1)}s
+- Camera Style: ${directorConfig.camera || 'Mixed'}
+- Visual Grade: ${directorConfig.colorGrade || 'Natural'}
+
+FOR EACH SHOT (analyze the actual image content):
+┌─────────────────────────────────────────
+│ SHOT XX — "Frame Title"
+│ Duration:    Xs
+│ Shot Type:   [Wide/Medium/Close-up/etc based on image]
+│ Camera:      [Movement based on settings + what suits the image]
+│ Lens:        [From settings or appropriate choice]
+│ Lighting:    [From settings or inferred from image]
+│ Action:      [What's happening in the frame]
+│ Motion:      [Camera movement notes]
+│ Transition:  [To next shot]
+└─────────────────────────────────────────
+
+End with: "Shot list aligned to your storyboard."
+
+Output ONLY the shot list text, formatted with the box characters shown. No markdown code blocks.`
+  });
+
+  // Add frame images for visual analysis
+  for (const frame of frames.slice(0, 8)) { // Limit to 8 frames
+    if (frame.imageUrl) {
+      try {
+        const base64 = await imageUrlToBase64(frame.imageUrl);
+        parts.push({
+          inlineData: {
+            data: base64.replace(/^data:image\/\w+;base64,/, ""),
+            mimeType: "image/png",
+          },
+        });
+      } catch (e) {
+        console.warn(`Failed to load frame image for shot list: ${e}`);
+      }
+    }
+  }
+
+  const response = await ai.models.generateContent({
+    model: "gemini-2.0-flash",
+    contents: [{ role: "user", parts }],
+  });
+
+  return response.text?.trim() || "Failed to generate shot list.";
+}
+
+/**
+ * Rewrite/enhance a master prompt with director's guidance
+ * Takes an existing prompt and enhances it with creative direction
+ */
+export async function rewriteMasterPrompt(
+  originalMasterPrompt: string,
+  directorConfig: DirectorConfig
+): Promise<string> {
+  if (!ai) {
+    throw new Error("Google AI not configured. Add VITE_GEMINI_API_KEY to .env");
+  }
+
+  if (!originalMasterPrompt || originalMasterPrompt.trim().length === 0) {
+    return "No original prompt provided to rewrite.";
+  }
+
+  // Build director guidance block
+  const guidanceLines: string[] = [];
+
+  if (directorConfig.mood) {
+    const moodDescriptions: Record<string, string> = {
+      'Dreamy': 'ethereal, soft-focus quality with a dreamlike atmosphere',
+      'Tense': 'building suspense with tight framing and dramatic timing',
+      'Epic': 'sweeping grandeur with heroic scale and emotional weight',
+      'Cozy': 'warm, intimate feeling with comfortable visual warmth',
+      'Whimsical': 'playful, lighthearted energy with creative visual surprises',
+      'Noir': 'dramatic shadows, high contrast, mysterious atmosphere',
+      'Energetic': 'dynamic, vibrant movement with kinetic energy',
+      'Minimal': 'clean, purposeful restraint with elegant simplicity',
+      'Documentary': 'authentic, observational style with natural realism',
+    };
+    guidanceLines.push(`Mood: ${directorConfig.mood} — ${moodDescriptions[directorConfig.mood] || directorConfig.mood}`);
+  }
+
+  const pacingDescriptions: Record<string, string> = {
+    'Slow': 'languid, contemplative rhythm allowing moments to breathe',
+    'Medium': 'balanced, natural flow with comfortable pacing',
+    'Fast': 'energetic quick cuts maintaining momentum',
+  };
+  guidanceLines.push(`Pacing: ${pacingDescriptions[directorConfig.pacing]}`);
+
+  if (directorConfig.camera) {
+    const cameraDescriptions: Record<string, string> = {
+      'Static tripod': 'locked-off, stable compositions',
+      'Handheld doc': 'intimate, documentary-style organic movement',
+      'Smooth dolly': 'graceful lateral tracking movements',
+      'Crane/jib': 'sweeping vertical reveals and elevated perspectives',
+      'Orbit': 'circular movement around subjects',
+      'FPV drift': 'immersive first-person floating perspective',
+    };
+    guidanceLines.push(`Camera: ${cameraDescriptions[directorConfig.camera] || directorConfig.camera}`);
+  }
+
+  if (directorConfig.lens) {
+    guidanceLines.push(`Lens: ${directorConfig.lens} perspective and depth of field`);
+  }
+
+  if (directorConfig.lighting) {
+    guidanceLines.push(`Lighting: ${directorConfig.lighting} aesthetic`);
+  }
+
+  if (directorConfig.colorGrade) {
+    guidanceLines.push(`Color grade: ${directorConfig.colorGrade} look`);
+  }
+
+  const motionLabel = directorConfig.motionIntensity < 33 ? 'subtle' : directorConfig.motionIntensity > 66 ? 'dynamic' : 'moderate';
+  guidanceLines.push(`Motion intensity: ${motionLabel} movement (${directorConfig.motionIntensity}%)`);
+
+  const continuityLabel = directorConfig.continuityStrictness < 33 ? 'loose' : directorConfig.continuityStrictness > 66 ? 'strict' : 'balanced';
+  guidanceLines.push(`Continuity: ${continuityLabel} — ${
+    directorConfig.continuityStrictness > 50
+      ? 'maintain consistent character appearance, preserve scene composition, no new objects unless story-implied'
+      : 'allow creative interpretation between shots while maintaining overall coherence'
+  }`);
+
+  if (directorConfig.noGoList.length > 0) {
+    guidanceLines.push(`MUST AVOID: ${directorConfig.noGoList.join(', ')}`);
+  }
+
+  const response = await ai.models.generateContent({
+    model: "gemini-2.0-flash",
+    contents: `You are a master cinematographer and creative director. Rewrite and enhance the following video generation prompt by incorporating the director's guidance seamlessly.
+
+ORIGINAL PROMPT:
+${originalMasterPrompt}
+
+DIRECTOR'S GUIDANCE:
+${guidanceLines.join('\n')}
+
+INSTRUCTIONS:
+1. Preserve the core narrative and visual content from the original prompt
+2. Weave the director's guidance naturally into the prompt
+3. Make specific visual recommendations based on the mood, camera, and lighting choices
+4. If there are items to avoid, ensure the prompt explicitly excludes them
+5. Keep the enhanced prompt concise but comprehensive (under 300 words)
+6. Write in a clear, directive style suitable for AI video generation
+
+Output ONLY the enhanced prompt text. Do not include explanations, headers, or markdown formatting.`,
+  });
+
+  return response.text?.trim() || originalMasterPrompt;
+}

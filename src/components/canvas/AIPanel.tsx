@@ -18,7 +18,13 @@ import {
   Sliders,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { generateStoryboardVideoPrompt } from "@/lib/googleAI";
+import {
+  generateStoryboardVideoPrompt,
+  generateDirectorsTreatment,
+  generateShotList as generateShotListAI,
+  rewriteMasterPrompt,
+  DirectorConfig,
+} from "@/lib/googleAI";
 import { generateVideoFromFrame } from "@/lib/videoGeneration";
 
 interface Frame {
@@ -55,10 +61,10 @@ interface GeneratedPrompt {
   technicalNotes: string;
 }
 
-// Creative Director types
-type Mood = "Epic" | "Whimsical" | "Tense" | "Romantic" | "Uplifting" | "Mysterious" | "Minimal";
+// Creative Director types - Updated per spec
+type Mood = "Dreamy" | "Tense" | "Epic" | "Cozy" | "Whimsical" | "Noir" | "Energetic" | "Minimal" | "Documentary";
 type Pacing = "Slow" | "Medium" | "Fast";
-type CameraLanguage = "Handheld" | "Locked-off" | "Dolly" | "Crane" | "Drone" | "Steadicam";
+type CameraLanguage = "Static tripod" | "Handheld doc" | "Smooth dolly" | "Crane/jib" | "Orbit" | "FPV drift";
 type Lens = "14mm wide" | "24mm" | "35mm" | "50mm" | "85mm portrait";
 type Lighting = "Soft key" | "High contrast" | "Neon night" | "Golden hour" | "Studio clean";
 type ColorGrade = "Teal & orange" | "Pastel" | "Monochrome" | "Film grain" | "Vibrant";
@@ -88,6 +94,36 @@ const DEFAULT_DIRECTOR_SETTINGS: CreativeDirectorSettings = {
   continuityStrictness: 70,
   noGoList: [],
 };
+
+// Storage key for director settings per board
+function getDirectorStorageKey(boardId: string | undefined): string {
+  return `creative_director_${boardId || 'default'}`;
+}
+
+// Load director settings from localStorage
+function loadDirectorSettings(boardId: string | undefined): CreativeDirectorSettings {
+  try {
+    const key = getDirectorStorageKey(boardId);
+    const stored = localStorage.getItem(key);
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      return { ...DEFAULT_DIRECTOR_SETTINGS, ...parsed };
+    }
+  } catch (e) {
+    console.warn("Failed to load director settings:", e);
+  }
+  return { ...DEFAULT_DIRECTOR_SETTINGS };
+}
+
+// Save director settings to localStorage (debounced in component)
+function saveDirectorSettings(boardId: string | undefined, settings: CreativeDirectorSettings): void {
+  try {
+    const key = getDirectorStorageKey(boardId);
+    localStorage.setItem(key, JSON.stringify(settings));
+  } catch (e) {
+    console.warn("Failed to save director settings:", e);
+  }
+}
 
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
@@ -156,136 +192,6 @@ function buildDirectorGuidance(frames: Frame[], settings: CreativeDirectorSettin
   return lines.join("\n");
 }
 
-// Generate director's treatment (deterministic, no API call)
-function generateTreatment(frames: Frame[], settings: CreativeDirectorSettings): string {
-  if (frames.length === 0) return "";
-
-  const totalDuration = frames.reduce((acc, f) => acc + (f.durationMs || 2000), 0) / 1000;
-  const frameTitles = frames.map((f, i) => f.title || `Frame ${i + 1}`);
-
-  const moodDesc = settings.mood
-    ? {
-        Epic: "sweeping grandeur and heroic undertones",
-        Whimsical: "playful charm and lighthearted energy",
-        Tense: "building suspense and edge-of-seat anticipation",
-        Romantic: "intimate warmth and emotional connection",
-        Uplifting: "inspiring hope and positive momentum",
-        Mysterious: "enigmatic atmosphere and intrigue",
-        Minimal: "elegant restraint and purposeful simplicity",
-      }[settings.mood]
-    : "a carefully crafted emotional journey";
-
-  const cameraDesc = settings.camera
-    ? {
-        Handheld: "intimate, documentary-style camera work that puts the viewer in the scene",
-        "Locked-off": "composed, architectural framing with deliberate stillness",
-        Dolly: "graceful lateral movements that guide the eye through space",
-        Crane: "sweeping vertical reveals that establish scale and grandeur",
-        Drone: "expansive aerial perspectives that contextualize the narrative",
-        Steadicam: "fluid, floating movement that follows action seamlessly",
-      }[settings.camera]
-    : "purposeful camera movement that serves the story";
-
-  const treatment = `
-DIRECTOR'S TREATMENT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-PROJECT OVERVIEW
-This ${totalDuration.toFixed(1)}-second piece unfolds across ${frames.length} carefully composed shots, delivering ${moodDesc}.
-
-VISUAL APPROACH
-The cinematography employs ${cameraDesc}. ${settings.lens ? `Shot primarily on ${settings.lens} to achieve the desired depth and perspective.` : "Lens choices serve each moment's emotional needs."}
-
-${settings.lighting ? `LIGHTING DIRECTION\nThe piece is lit with a ${settings.lighting} approach, creating visual cohesion across all frames.` : ""}
-
-${settings.colorGrade ? `COLOR PHILOSOPHY\nA ${settings.colorGrade} grade unifies the visual language, reinforcing the ${settings.mood || "intended"} tone.` : ""}
-
-NARRATIVE ARC
-${frameTitles.map((title, i) => `${i + 1}. "${title}" — ${i === 0 ? "establishes the visual world" : i === frameTitles.length - 1 ? "delivers the emotional resolution" : "develops the visual narrative"}`).join("\n")}
-
-PACING & RHYTHM
-The edit follows a ${settings.pacing.toLowerCase()} rhythm, ${settings.pacing === "Slow" ? "allowing moments to breathe and resonate" : settings.pacing === "Fast" ? "maintaining energetic momentum throughout" : "balancing contemplation with forward motion"}.
-
-${settings.motionIntensity > 50 ? `MOTION PHILOSOPHY\nDynamic camera movement (${settings.motionIntensity}% intensity) creates kinetic energy while maintaining visual clarity.` : settings.motionIntensity < 50 ? `MOTION PHILOSOPHY\nSubtle, restrained movement (${settings.motionIntensity}% intensity) allows composition and performance to carry the scene.` : ""}
-
-CONTINUITY NOTES
-${settings.continuityStrictness > 50 ? "Strict continuity rules apply: character appearance, props, and environmental details must remain consistent across all shots. No elements should appear or disappear without narrative justification." : "Creative continuity allows for interpretive visual connections between shots while maintaining overall coherence."}
-
-${settings.noGoList.length > 0 ? `RESTRICTIONS\nThe following are explicitly prohibited: ${settings.noGoList.join(", ")}.` : ""}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"Make it feel directed, not generated."
-  `.trim();
-
-  return treatment;
-}
-
-// Generate shot list (deterministic, no API call)
-function generateShotList(frames: Frame[], settings: CreativeDirectorSettings): string {
-  if (frames.length === 0) return "";
-
-  const cameraMovements: Record<CameraLanguage, string[]> = {
-    Handheld: ["follows action", "subtle drift", "reactive movement", "organic sway"],
-    "Locked-off": ["static hold", "tripod-mounted", "architectural frame", "stable composition"],
-    Dolly: ["push in", "pull back", "lateral track", "arc around subject"],
-    Crane: ["rise up", "descend", "sweeping reveal", "overhead to eye-level"],
-    Drone: ["ascending wide", "flyover", "orbit", "reveal pull-back"],
-    Steadicam: ["follow shot", "walk-and-talk", "fluid approach", "360° orbit"],
-  };
-
-  const lensFraming: Record<Lens, string> = {
-    "14mm wide": "ultra-wide establishing",
-    "24mm": "wide environmental",
-    "35mm": "natural perspective",
-    "50mm": "standard clean",
-    "85mm portrait": "compressed intimate",
-  };
-
-  const shotList = frames.map((frame, i) => {
-    const title = frame.title || `Frame ${i + 1}`;
-    const duration = ((frame.durationMs || 2000) / 1000).toFixed(1);
-    const camera = settings.camera || "Steadicam";
-    const movements = cameraMovements[camera];
-    const movement = movements[i % movements.length];
-    const lens = settings.lens || "35mm";
-    const framing = lensFraming[lens as Lens] || "natural";
-    const lighting = settings.lighting || "natural";
-    const motionNotes = frame.motionNotes || "";
-
-    return `
-SHOT ${String(i + 1).padStart(2, "0")} — "${title}"
-┌─────────────────────────────────────────
-│ Duration:    ${duration}s
-│ Camera:      ${camera}, ${movement}
-│ Lens:        ${lens} (${framing} framing)
-│ Lighting:    ${lighting}
-│ Motion:      ${motionNotes || `${settings.motionIntensity > 50 ? "Dynamic" : "Subtle"} movement`}
-└─────────────────────────────────────────`;
-  });
-
-  const header = `
-SHOT LIST
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Total Shots: ${frames.length}
-Total Duration: ${(frames.reduce((acc, f) => acc + (f.durationMs || 2000), 0) / 1000).toFixed(1)}s
-Camera Style: ${settings.camera || "Director's choice"}
-Visual Grade: ${settings.colorGrade || "Natural"}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-"Shot list aligned to your storyboard."
-  `.trim();
-
-  return header + "\n" + shotList.join("\n");
-}
-
-// Generate enhanced master prompt (deterministic, no API call)
-function generateEnhancedPrompt(frames: Frame[], settings: CreativeDirectorSettings, existingPrompt?: string): string {
-  const basePrompt = existingPrompt || frames.map((f, i) => f.title || `Scene ${i + 1}`).join(", then ");
-
-  const guidance = buildDirectorGuidance(frames, settings);
-
-  return `${basePrompt}\n\n${guidance}`;
-}
-
 export function AIPanel({
   selectedFrames,
   frames,
@@ -311,9 +217,9 @@ export function AIPanel({
   const [promptCopied, setPromptCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Creative Director state
+  // Creative Director state - loaded from localStorage per board
   const [showDirector, setShowDirector] = useState(false);
-  const [directorSettings, setDirectorSettings] = useState<CreativeDirectorSettings>(DEFAULT_DIRECTOR_SETTINGS);
+  const [directorSettings, setDirectorSettings] = useState<CreativeDirectorSettings>(() => loadDirectorSettings(boardId));
   const [directorEnabled, setDirectorEnabled] = useState(false);
   const [noGoInput, setNoGoInput] = useState("");
   const [directorOutputTab, setDirectorOutputTab] = useState<DirectorOutputTab>("treatment");
@@ -324,6 +230,31 @@ export function AIPanel({
   }>({ treatment: "", shotlist: "", prompt: "" });
   const [showDirectorOutputs, setShowDirectorOutputs] = useState(false);
   const [directorCopied, setDirectorCopied] = useState(false);
+  const [isGeneratingDirectorOutput, setIsGeneratingDirectorOutput] = useState(false);
+
+  // Debounced save of director settings
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    // Save settings debounced
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+    saveTimeoutRef.current = setTimeout(() => {
+      saveDirectorSettings(boardId, directorSettings);
+    }, 500);
+
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+    };
+  }, [directorSettings, boardId]);
+
+  // Reload settings when boardId changes
+  useEffect(() => {
+    setDirectorSettings(loadDirectorSettings(boardId));
+  }, [boardId]);
 
   // Run-safety
   const runIdRef = useRef<string | null>(null);
@@ -386,30 +317,132 @@ export function AIPanel({
     setGenerationProgress(Math.round(clamp(p, 0, 100)));
   }, []);
 
-  // Director output handlers
-  const handleGenerateTreatment = () => {
-    const treatment = generateTreatment(frames, directorSettings);
-    setDirectorOutputs((prev) => ({ ...prev, treatment }));
+  // Convert CreativeDirectorSettings to DirectorConfig for API calls
+  const toDirectorConfig = (settings: CreativeDirectorSettings): DirectorConfig => ({
+    mood: settings.mood,
+    pacing: settings.pacing,
+    camera: settings.camera,
+    lens: settings.lens,
+    lighting: settings.lighting,
+    colorGrade: settings.colorGrade,
+    motionIntensity: settings.motionIntensity,
+    continuityStrictness: settings.continuityStrictness,
+    noGoList: settings.noGoList,
+  });
+
+  // Prepare frames for API calls
+  const prepareFramesForAPI = () => {
+    return frames.map((f, index) => ({
+      title: f.title || `Frame ${index + 1}`,
+      imageUrl: getFrameImageUrl(f) || "",
+      durationMs: f.durationMs || 2000,
+      motionNotes: f.motionNotes,
+      order: index,
+    })).filter((f) => !!f.imageUrl);
+  };
+
+  // Director output handlers - API-based
+  const handleGenerateTreatment = async () => {
+    if (isGeneratingDirectorOutput || totalFrames === 0) return;
+
+    setIsGeneratingDirectorOutput(true);
+    setError(null);
     setDirectorOutputTab("treatment");
     setShowDirectorOutputs(true);
+    setDirectorOutputs((prev) => ({ ...prev, treatment: "Generating treatment..." }));
+
+    try {
+      const orderedFrames = prepareFramesForAPI();
+      const treatment = await generateDirectorsTreatment(
+        orderedFrames,
+        selectedStyle,
+        toDirectorConfig(directorSettings)
+      );
+      if (mountedRef.current) {
+        setDirectorOutputs((prev) => ({ ...prev, treatment }));
+      }
+    } catch (err) {
+      console.error("Failed to generate treatment:", err);
+      if (mountedRef.current) {
+        setError(err instanceof Error ? err.message : "Failed to generate treatment");
+        setDirectorOutputs((prev) => ({ ...prev, treatment: "Generation failed. Please try again." }));
+      }
+    } finally {
+      if (mountedRef.current) {
+        setIsGeneratingDirectorOutput(false);
+      }
+    }
   };
 
-  const handleGenerateShotList = () => {
-    const shotlist = generateShotList(frames, directorSettings);
-    setDirectorOutputs((prev) => ({ ...prev, shotlist }));
+  const handleGenerateShotList = async () => {
+    if (isGeneratingDirectorOutput || totalFrames === 0) return;
+
+    setIsGeneratingDirectorOutput(true);
+    setError(null);
     setDirectorOutputTab("shotlist");
     setShowDirectorOutputs(true);
+    setDirectorOutputs((prev) => ({ ...prev, shotlist: "Generating shot list..." }));
+
+    try {
+      const orderedFrames = prepareFramesForAPI();
+      const shotlist = await generateShotListAI(
+        orderedFrames,
+        selectedStyle,
+        toDirectorConfig(directorSettings)
+      );
+      if (mountedRef.current) {
+        setDirectorOutputs((prev) => ({ ...prev, shotlist }));
+      }
+    } catch (err) {
+      console.error("Failed to generate shot list:", err);
+      if (mountedRef.current) {
+        setError(err instanceof Error ? err.message : "Failed to generate shot list");
+        setDirectorOutputs((prev) => ({ ...prev, shotlist: "Generation failed. Please try again." }));
+      }
+    } finally {
+      if (mountedRef.current) {
+        setIsGeneratingDirectorOutput(false);
+      }
+    }
   };
 
-  const handleRewritePrompt = () => {
-    const prompt = generateEnhancedPrompt(
-      frames,
-      directorSettings,
-      generatedPrompt?.masterPrompt
-    );
-    setDirectorOutputs((prev) => ({ ...prev, prompt }));
+  const handleRewritePrompt = async () => {
+    if (isGeneratingDirectorOutput) return;
+
+    // Need a base prompt to rewrite - either from generated prompt or build a simple one
+    const basePrompt = generatedPrompt?.masterPrompt ||
+      frames.map((f, i) => f.title || `Scene ${i + 1}`).join(", then ");
+
+    if (!basePrompt || basePrompt.trim().length === 0) {
+      setError("Generate a video prompt first, then rewrite with director settings.");
+      return;
+    }
+
+    setIsGeneratingDirectorOutput(true);
+    setError(null);
     setDirectorOutputTab("prompt");
     setShowDirectorOutputs(true);
+    setDirectorOutputs((prev) => ({ ...prev, prompt: "Rewriting prompt with director guidance..." }));
+
+    try {
+      const rewrittenPrompt = await rewriteMasterPrompt(
+        basePrompt,
+        toDirectorConfig(directorSettings)
+      );
+      if (mountedRef.current) {
+        setDirectorOutputs((prev) => ({ ...prev, prompt: rewrittenPrompt }));
+      }
+    } catch (err) {
+      console.error("Failed to rewrite prompt:", err);
+      if (mountedRef.current) {
+        setError(err instanceof Error ? err.message : "Failed to rewrite prompt");
+        setDirectorOutputs((prev) => ({ ...prev, prompt: "Generation failed. Please try again." }));
+      }
+    } finally {
+      if (mountedRef.current) {
+        setIsGeneratingDirectorOutput(false);
+      }
+    }
   };
 
   const handleCopyDirectorOutput = async () => {
@@ -516,7 +549,10 @@ export function AIPanel({
       if (runIdRef.current !== runId || !mountedRef.current) return;
 
       setProgressSafe(100);
-      safeSetSession("generatedVideoPrompt", veoPrompt);
+      // Store both original and directed prompts in sessionStorage
+      safeSetSession("generatedVideoPromptOriginal", basePrompt);
+      safeSetSession("generatedVideoPromptDirected", veoPrompt);
+      safeSetSession("generatedVideoPrompt", veoPrompt); // Keep for backwards compat
       setGenerationStep("complete");
 
       if (videoResult?.status === "done" && videoResult.videoUrl) {
@@ -573,9 +609,9 @@ export function AIPanel({
   };
 
   const styles: VideoStyle[] = ["Cinematic", "Animated", "Realistic", "Stylized"];
-  const moods: Mood[] = ["Epic", "Whimsical", "Tense", "Romantic", "Uplifting", "Mysterious", "Minimal"];
+  const moods: Mood[] = ["Dreamy", "Tense", "Epic", "Cozy", "Whimsical", "Noir", "Energetic", "Minimal", "Documentary"];
   const pacings: Pacing[] = ["Slow", "Medium", "Fast"];
-  const cameras: CameraLanguage[] = ["Handheld", "Locked-off", "Dolly", "Crane", "Drone", "Steadicam"];
+  const cameras: CameraLanguage[] = ["Static tripod", "Handheld doc", "Smooth dolly", "Crane/jib", "Orbit", "FPV drift"];
   const lenses: Lens[] = ["14mm wide", "24mm", "35mm", "50mm", "85mm portrait"];
   const lightings: Lighting[] = ["Soft key", "High contrast", "Neon night", "Golden hour", "Studio clean"];
   const colorGrades: ColorGrade[] = ["Teal & orange", "Pastel", "Monochrome", "Film grain", "Vibrant"];
@@ -928,28 +964,40 @@ export function AIPanel({
 
                     <button
                       onClick={handleGenerateTreatment}
-                      disabled={totalFrames === 0}
+                      disabled={totalFrames === 0 || isGeneratingDirectorOutput}
                       className="w-full py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-[10px] text-white/70 transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
                     >
-                      <FileText className="w-3 h-3" />
+                      {isGeneratingDirectorOutput && directorOutputTab === "treatment" ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <FileText className="w-3 h-3" />
+                      )}
                       Generate Director's Treatment
                     </button>
 
                     <button
                       onClick={handleGenerateShotList}
-                      disabled={totalFrames === 0}
+                      disabled={totalFrames === 0 || isGeneratingDirectorOutput}
                       className="w-full py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-[10px] text-white/70 transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
                     >
-                      <Clapperboard className="w-3 h-3" />
+                      {isGeneratingDirectorOutput && directorOutputTab === "shotlist" ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Clapperboard className="w-3 h-3" />
+                      )}
                       Generate Shot List
                     </button>
 
                     <button
                       onClick={handleRewritePrompt}
-                      disabled={totalFrames === 0}
+                      disabled={totalFrames === 0 || isGeneratingDirectorOutput}
                       className="w-full py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-[10px] text-white/70 transition-all disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
                     >
-                      <Wand2 className="w-3 h-3" />
+                      {isGeneratingDirectorOutput && directorOutputTab === "prompt" ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Wand2 className="w-3 h-3" />
+                      )}
                       Rewrite Master Prompt
                     </button>
 
