@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -42,13 +42,62 @@ interface AIPanelProps {
   onPreview?: () => void;
 }
 
-type VideoStyle = 'Cinematic' | 'Animated' | 'Realistic' | 'Stylized';
+type VideoStyle = "Cinematic" | "Animated" | "Realistic" | "Stylized";
 
 interface GeneratedPrompt {
   masterPrompt: string;
   framePrompts: Array<{ frameTitle: string; prompt: string; duration: number }>;
   totalDuration: number;
   technicalNotes: string;
+}
+
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function safeSetSession(key: string, value: string) {
+  try {
+    sessionStorage.setItem(key, value);
+  } catch {
+    // Quota or disabled storage; fail silently (we still show prompt in UI)
+  }
+}
+
+function getFrameImageUrl(f: Frame): string | null {
+  // Prefer the most "final" asset first
+  return f.polishedDataUrl || f.thumbnail || f.sketchDataUrl || null;
+}
+
+async function toBase64DataUrl(imageUrl: string, timeoutMs = 15000): Promise<string> {
+  // If already base64, return
+  if (imageUrl.startsWith("data:")) return imageUrl;
+
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(imageUrl, { signal: controller.signal });
+    if (!res.ok) throw new Error(`Image fetch failed (${res.status})`);
+
+    const blob = await res.blob();
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("Failed to read image as base64"));
+      reader.onloadend = () => resolve(reader.result as string);
+      reader.readAsDataURL(blob);
+    });
+  } catch (e) {
+    // Most common judge-day failure: CORS / blocked URL
+    const msg =
+      e instanceof Error
+        ? e.message
+        : "Unknown error converting image to base64";
+    throw new Error(
+      `Could not access frame image. If this is a remote URL, it may be blocked by CORS. (${msg})`
+    );
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 export function AIPanel({
@@ -64,141 +113,205 @@ export function AIPanel({
 
   // Generation state
   const [isGenerating, setIsGenerating] = useState(false);
-  const [generationStep, setGenerationStep] = useState<'idle' | 'analyzing' | 'prompting' | 'generating' | 'complete'>('idle');
+  const [generationStep, setGenerationStep] = useState<
+    "idle" | "analyzing" | "prompting" | "generating" | "complete"
+  >("idle");
   const [generationProgress, setGenerationProgress] = useState(0);
   const [selectedStyle, setSelectedStyle] = useState<VideoStyle>("Cinematic");
 
   // Generated prompt state
-  const [generatedPrompt, setGeneratedPrompt] = useState<GeneratedPrompt | null>(null);
+  const [generatedPrompt, setGeneratedPrompt] = useState<GeneratedPrompt | null>(
+    null
+  );
   const [showPromptDetails, setShowPromptDetails] = useState(false);
   const [promptCopied, setPromptCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Count frames by status
-  const polishedCount = frames.filter(f => f.status === "polished").length;
+  // Run-safety: ignore stale async completions
+  const runIdRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const polishedCount = useMemo(
+    () => frames.filter((f) => f.status === "polished").length,
+    [frames]
+  );
   const totalFrames = frames.length;
 
-  // Calculate total duration
-  const totalDuration = frames.reduce((acc, f) => acc + (f.durationMs || 2000), 0) / 1000;
+  const totalDuration = useMemo(() => {
+    return frames.reduce((acc, f) => acc + (f.durationMs || 2000), 0) / 1000;
+  }, [frames]);
 
-  // Get selected frame details
-  const selectedFrame = selectedFrames.length === 1
-    ? frames.find(f => f.id === selectedFrames[0])
-    : null;
+  const selectedFrame = useMemo(() => {
+    return selectedFrames.length === 1
+      ? frames.find((f) => f.id === selectedFrames[0]) || null
+      : null;
+  }, [selectedFrames, frames]);
 
-  // Check if ready to generate
-  const canGenerate = polishedCount === totalFrames && totalFrames > 0 && !isGenerating;
+  // More honest readiness checks
+  const frameImageStats = useMemo(() => {
+    const missingImage = frames.filter((f) => !getFrameImageUrl(f)).length;
+    const unpolished = frames.filter((f) => f.status !== "polished").length;
+    return { missingImage, unpolished };
+  }, [frames]);
 
-  // Reset generation state when frames change significantly
+  // Veo typical hard bounds (you clamp later anyway); we warn early
+  const durationTooShort = totalDuration < 5;
+  const durationTooLong = totalDuration > 60;
+
+  const canGenerate =
+    totalFrames > 0 &&
+    !isGenerating &&
+    frameImageStats.unpolished === 0 &&
+    frameImageStats.missingImage === 0;
+
+  // Mark prompt stale if frames/style changed after generation
   useEffect(() => {
-    if (generatedPrompt && generationStep === 'complete') {
-      // If frames changed after generation, mark as stale
-      const currentDuration = frames.reduce((acc, f) => acc + (f.durationMs || 2000), 0) / 1000;
-      if (Math.abs(currentDuration - generatedPrompt.totalDuration) > 0.5) {
-        setGeneratedPrompt(null);
-        setGenerationStep('idle');
-      }
+    if (!generatedPrompt || generationStep !== "complete") return;
+
+    const currentDuration =
+      frames.reduce((acc, f) => acc + (f.durationMs || 2000), 0) / 1000;
+
+    const durationDrift = Math.abs(currentDuration - generatedPrompt.totalDuration);
+    if (durationDrift > 0.5) {
+      setGeneratedPrompt(null);
+      setGenerationStep("idle");
+      setShowPromptDetails(false);
     }
   }, [frames, generatedPrompt, generationStep]);
+
+  const setProgressSafe = useCallback((p: number) => {
+    if (!mountedRef.current) return;
+    setGenerationProgress(Math.round(clamp(p, 0, 100)));
+  }, []);
 
   const handleGenerateVideo = async () => {
     if (!canGenerate) return;
 
+    const runId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    runIdRef.current = runId;
+
     setIsGenerating(true);
     setError(null);
-    setGenerationProgress(0);
-    setGenerationStep('analyzing');
+    setProgressSafe(0);
+    setGenerationStep("analyzing");
 
     try {
-      // Step 1: Analyzing frames (0-20%)
-      setGenerationProgress(10);
+      // Step 1: Prepare frames (0–20)
+      setProgressSafe(10);
 
-      // Prepare frames data
-      const orderedFrames = frames.map((f, index) => ({
-        title: f.title || `Frame ${index + 1}`,
-        imageUrl: f.polishedDataUrl || f.sketchDataUrl || f.thumbnail || '',
-        durationMs: f.durationMs || 2000,
-        motionNotes: f.motionNotes,
-        order: index,
-      })).filter(f => f.imageUrl);
+      // IMPORTANT: use frames in the order they are passed in.
+      // If you want connection-order, pass getSequencedFrames() from CanvasPage into AIPanel.
+      const orderedFrames = frames
+        .map((f, index) => ({
+          title: f.title || `Frame ${index + 1}`,
+          imageUrl: getFrameImageUrl(f) || "",
+          durationMs: f.durationMs || 2000,
+          motionNotes: f.motionNotes,
+          order: index,
+        }))
+        .filter((f) => !!f.imageUrl);
 
       if (orderedFrames.length === 0) {
-        throw new Error("No frame images available");
+        throw new Error("No frame images available (missing thumbnails/polished/sketch images)");
       }
 
-      // Find first polished frame for video generation
-      const firstPolishedFrame = orderedFrames.find(f => f.imageUrl);
-      if (!firstPolishedFrame?.imageUrl) {
-        throw new Error("No polished frames available");
-      }
+      // Choose the first frame in the ordered sequence as conditioning image
+      const firstFrame = orderedFrames[0];
+      if (!firstFrame?.imageUrl) throw new Error("First frame has no usable image URL");
 
-      setGenerationProgress(20);
-      setGenerationStep('prompting');
+      setProgressSafe(20);
+      setGenerationStep("prompting");
 
-      // Step 2: Generate prompt (20-40%)
-      const promptResult = await generateStoryboardVideoPrompt(orderedFrames, selectedStyle);
+      // Step 2: Prompt generation (20–40)
+      const promptResult = await generateStoryboardVideoPrompt(
+        orderedFrames,
+        selectedStyle
+      );
+
+      // stale-run guard
+      if (runIdRef.current !== runId || !mountedRef.current) return;
+
       setGeneratedPrompt(promptResult);
-      setGenerationProgress(40);
+      setProgressSafe(40);
+      setGenerationStep("generating");
 
-      setGenerationStep('generating');
+      // Step 3: Generate video via Edge Function (40–100)
+      // Convert conditioning frame image to base64 safely
+      const imageBase64 = await toBase64DataUrl(firstFrame.imageUrl);
 
-      // Step 3: Convert image to base64 and generate video with Veo via Supabase Edge Function
-      const imageResponse = await fetch(firstPolishedFrame.imageUrl);
-      const blob = await imageResponse.blob();
-      const imageBase64 = await new Promise<string>((resolve) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result as string);
-        reader.readAsDataURL(blob);
-      });
+      // stale-run guard
+      if (runIdRef.current !== runId || !mountedRef.current) return;
+
+      // Veo clamp: 5–60s (you can also split into multiple shots later)
+      const requestedSecondsRaw = Math.round((firstFrame.durationMs || 2000) / 1000);
+      const requestedSeconds = clamp(requestedSecondsRaw, 5, 60);
 
       const videoResult = await generateVideoFromFrame(
-        promptResult?.masterPrompt || 'Animate this scene with smooth motion',
+        promptResult?.masterPrompt || "Animate this scene with smooth motion",
         imageBase64,
-        Math.round((firstPolishedFrame.durationMs || 2000) / 1000),
+        requestedSeconds,
         (progress, status) => {
-          setGenerationProgress(40 + (progress * 0.6)); // Scale 0-100 to 40-100
+          // Scale 0–100 => 40–100
+          const scaled = 40 + clamp(progress, 0, 100) * 0.6;
+          setProgressSafe(scaled);
+          // optional log
           console.log(`[Video Gen] ${status}: ${progress}%`);
         }
       );
 
-      setGenerationProgress(100);
+      // stale-run guard
+      if (runIdRef.current !== runId || !mountedRef.current) return;
 
-      if (videoResult.status === 'done' && videoResult.videoUrl) {
-        // Store video URL for export page
-        sessionStorage.setItem('generatedVideoUrl', videoResult.videoUrl);
-        sessionStorage.setItem('generatedVideoPrompt', promptResult.masterPrompt);
+      setProgressSafe(100);
 
-        setGenerationStep('complete');
+      // Always store prompt safely (even if video fails)
+      safeSetSession("generatedVideoPrompt", promptResult.masterPrompt);
+
+      setGenerationStep("complete");
+
+      if (videoResult?.status === "done" && videoResult.videoUrl) {
+        safeSetSession("generatedVideoUrl", videoResult.videoUrl);
+
         onAnimate();
 
-        // Navigate to export after short delay
+        // Navigate after short delay (avoid state updates after)
         setTimeout(() => {
+          if (!mountedRef.current) return;
           navigate(`/export/${boardId}`);
-        }, 1500);
-
-      } else if (videoResult.status === 'error') {
-        // Error from edge function
-        setGenerationStep('complete');
-        setError(videoResult.error || 'Video generation failed');
-        // Still store prompt for manual use
-        sessionStorage.setItem('generatedVideoPrompt', promptResult.masterPrompt);
-
-      } else {
-        // Unknown status - still show the prompt
-        setGenerationStep('complete');
-        console.warn("Video generation:", videoResult);
-        sessionStorage.setItem('generatedVideoPrompt', promptResult.masterPrompt);
-        // Navigate to export anyway - they can use the prompt
-        setTimeout(() => {
-          navigate(`/export/${boardId}`);
-        }, 1500);
+        }, 1200);
+        return;
       }
 
+      if (videoResult?.status === "error") {
+        setError(videoResult.error || "Video generation failed");
+        // Still allow user to export prompt
+        return;
+      }
+
+      // Unknown status: still let them continue with prompt
+      console.warn("Video generation returned unexpected result:", videoResult);
+      setTimeout(() => {
+        if (!mountedRef.current) return;
+        navigate(`/export/${boardId}`);
+      }, 1200);
     } catch (err) {
       console.error("Generation failed:", err);
+      if (!mountedRef.current) return;
       setError(err instanceof Error ? err.message : "Generation failed");
-      setGenerationStep('idle');
+      setGenerationStep("idle");
     } finally {
+      if (!mountedRef.current) return;
       setIsGenerating(false);
     }
   };
@@ -206,33 +319,55 @@ export function AIPanel({
   const handleCopyPrompt = async () => {
     if (!generatedPrompt) return;
 
-    const fullPrompt = `MASTER PROMPT:\n${generatedPrompt.masterPrompt}\n\nFRAME PROMPTS:\n${generatedPrompt.framePrompts.map((fp, i) => `${i + 1}. ${fp.frameTitle} (${fp.duration}s):\n${fp.prompt}`).join('\n\n')}\n\nTECHNICAL NOTES:\n${generatedPrompt.technicalNotes}`;
+    const fullPrompt = `MASTER PROMPT:\n${generatedPrompt.masterPrompt}\n\nFRAME PROMPTS:\n${generatedPrompt.framePrompts
+      .map(
+        (fp, i) => `${i + 1}. ${fp.frameTitle} (${fp.duration}s):\n${fp.prompt}`
+      )
+      .join("\n\n")}\n\nTECHNICAL NOTES:\n${generatedPrompt.technicalNotes}`;
 
-    await navigator.clipboard.writeText(fullPrompt);
-    setPromptCopied(true);
-    setTimeout(() => setPromptCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(fullPrompt);
+      setPromptCopied(true);
+      setTimeout(() => setPromptCopied(false), 2000);
+    } catch {
+      setError("Clipboard blocked. Copy manually from the prompt panel.");
+      setShowPromptDetails(true);
+    }
   };
 
   const handleExportToPDF = () => {
     navigate(`/export/${boardId}`);
   };
 
-  const styles: VideoStyle[] = ['Cinematic', 'Animated', 'Realistic', 'Stylized'];
+  const styles: VideoStyle[] = ["Cinematic", "Animated", "Realistic", "Stylized"];
 
   const getStepLabel = () => {
     switch (generationStep) {
-      case 'analyzing': return 'Analyzing frames...';
-      case 'prompting': return 'Crafting video prompt...';
-      case 'generating': return 'Generating video...';
-      case 'complete': return 'Ready!';
-      default: return '';
+      case "analyzing":
+        return "Analyzing frames...";
+      case "prompting":
+        return "Crafting video prompt...";
+      case "generating":
+        return "Generating video...";
+      case "complete":
+        return "Ready!";
+      default:
+        return "";
     }
   };
+
+  const framesNotReadyWarning =
+    totalFrames === 0
+      ? null
+      : frameImageStats.unpolished > 0
+      ? `Polish ${frameImageStats.unpolished} frame${frameImageStats.unpolished > 1 ? "s" : ""} first`
+      : frameImageStats.missingImage > 0
+      ? `Missing images for ${frameImageStats.missingImage} frame${frameImageStats.missingImage > 1 ? "s" : ""}`
+      : null;
 
   return (
     <div className="fixed right-4 top-20 bottom-4 w-72 z-40 bg-[#0f0f1a]/90 backdrop-blur-xl border border-white/[0.08] rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.4)] overflow-hidden flex flex-col">
       <div className="flex-1 overflow-y-auto">
-
         {/* Sequence Strip */}
         <div className="p-4 border-b border-white/10">
           <div className="flex items-center justify-between mb-3">
@@ -245,11 +380,12 @@ export function AIPanel({
               >
                 <Play className="w-4 h-4 text-white/70" />
               </button>
-              <span className="text-xs font-mono text-white/50">{totalDuration.toFixed(1)}s</span>
+              <span className="text-xs font-mono text-white/50">
+                {totalDuration.toFixed(1)}s
+              </span>
             </div>
           </div>
 
-          {/* Mini frame strip */}
           {totalFrames > 0 ? (
             <>
               <div className="flex gap-1.5 overflow-x-auto pb-1">
@@ -264,20 +400,23 @@ export function AIPanel({
                         : "border-white/10 hover:border-white/20"
                     )}
                   >
-                    {frame.thumbnail || frame.polishedDataUrl || frame.sketchDataUrl ? (
+                    {getFrameImageUrl(frame) ? (
                       <img
-                        src={frame.thumbnail || frame.polishedDataUrl || frame.sketchDataUrl}
+                        src={getFrameImageUrl(frame)!}
                         className="w-full h-full object-cover"
                         alt=""
                       />
                     ) : (
                       <div className="w-full h-full bg-white/5" />
                     )}
-                    {/* Status dot */}
-                    <div className={cn(
-                      "absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full",
-                      frame.status === "polished" ? "bg-emerald-400" : "bg-white/20"
-                    )} />
+                    <div
+                      className={cn(
+                        "absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full",
+                        frame.status === "polished"
+                          ? "bg-emerald-400"
+                          : "bg-white/20"
+                      )}
+                    />
                   </button>
                 ))}
               </div>
@@ -285,6 +424,14 @@ export function AIPanel({
               <p className="text-[10px] text-white/40 mt-2">
                 {polishedCount}/{totalFrames} polished
               </p>
+
+              {(durationTooShort || durationTooLong) && (
+                <p className="text-[10px] text-amber-400/70 mt-2">
+                  {durationTooShort
+                    ? "Total duration is under 5s (Veo may reject)."
+                    : "Total duration exceeds 60s (will be clamped)."}
+                </p>
+              )}
             </>
           ) : (
             <div className="h-12 rounded-md border border-dashed border-white/10 flex items-center justify-center">
@@ -300,9 +447,8 @@ export function AIPanel({
             <span className="text-xs font-medium text-white/70">Generate Video</span>
           </div>
 
-          {/* Style selector */}
           <div className="grid grid-cols-2 gap-1.5 mb-4">
-            {styles.map(style => (
+            {styles.map((style) => (
               <button
                 key={style}
                 onClick={() => setSelectedStyle(style)}
@@ -320,12 +466,11 @@ export function AIPanel({
             ))}
           </div>
 
-          {/* Progress bar (when generating) */}
           <AnimatePresence>
             {isGenerating && (
               <motion.div
                 initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: 'auto' }}
+                animate={{ opacity: 1, height: "auto" }}
                 exit={{ opacity: 0, height: 0 }}
                 className="mb-4"
               >
@@ -345,7 +490,6 @@ export function AIPanel({
             )}
           </AnimatePresence>
 
-          {/* Generate button */}
           <button
             onClick={handleGenerateVideo}
             disabled={!canGenerate}
@@ -361,7 +505,7 @@ export function AIPanel({
                 <Loader2 className="w-4 h-4 animate-spin" />
                 Generating...
               </>
-            ) : generationStep === 'complete' ? (
+            ) : generationStep === "complete" ? (
               <>
                 <Check className="w-4 h-4" />
                 Regenerate
@@ -378,27 +522,21 @@ export function AIPanel({
             Powered by Gemini + Veo 3
           </p>
 
-          {/* Error message */}
-          {error && (
-            <p className="text-[10px] text-red-400 text-center mt-2">
-              {error}
-            </p>
-          )}
+          {error && <p className="text-[10px] text-red-400 text-center mt-2">{error}</p>}
 
-          {/* Warning if frames not ready */}
-          {polishedCount < totalFrames && totalFrames > 0 && !isGenerating && (
+          {framesNotReadyWarning && !isGenerating && (
             <p className="text-[10px] text-amber-400/70 text-center mt-2">
-              Polish {totalFrames - polishedCount} frame{totalFrames - polishedCount > 1 ? 's' : ''} first
+              {framesNotReadyWarning}
             </p>
           )}
         </div>
 
-        {/* Generated Prompt (when complete) */}
+        {/* Generated Prompt */}
         <AnimatePresence>
-          {generatedPrompt && generationStep === 'complete' && (
+          {generatedPrompt && generationStep === "complete" && (
             <motion.div
               initial={{ opacity: 0, height: 0 }}
-              animate={{ opacity: 1, height: 'auto' }}
+              animate={{ opacity: 1, height: "auto" }}
               exit={{ opacity: 0, height: 0 }}
               className="border-b border-white/10"
             >
@@ -422,41 +560,50 @@ export function AIPanel({
                   {showPromptDetails && (
                     <motion.div
                       initial={{ opacity: 0, height: 0 }}
-                      animate={{ opacity: 1, height: 'auto' }}
+                      animate={{ opacity: 1, height: "auto" }}
                       exit={{ opacity: 0, height: 0 }}
                       className="mt-3 space-y-3"
                     >
-                      {/* Master prompt */}
                       <div>
-                        <span className="text-[10px] text-white/40 uppercase tracking-wider">Master Prompt</span>
+                        <span className="text-[10px] text-white/40 uppercase tracking-wider">
+                          Master Prompt
+                        </span>
                         <p className="text-xs text-white/80 mt-1 leading-relaxed">
                           {generatedPrompt.masterPrompt}
                         </p>
                       </div>
 
-                      {/* Frame prompts */}
                       <div>
-                        <span className="text-[10px] text-white/40 uppercase tracking-wider">Scene Breakdown</span>
+                        <span className="text-[10px] text-white/40 uppercase tracking-wider">
+                          Scene Breakdown
+                        </span>
                         <div className="mt-1 space-y-2 max-h-32 overflow-y-auto">
                           {generatedPrompt.framePrompts.map((fp, i) => (
-                            <div key={i} className="text-[10px] text-white/60 bg-white/5 rounded-lg p-2">
-                              <span className="text-white/80 font-medium">{fp.frameTitle}</span>
-                              <span className="text-white/40 ml-2">({fp.duration}s)</span>
+                            <div
+                              key={i}
+                              className="text-[10px] text-white/60 bg-white/5 rounded-lg p-2"
+                            >
+                              <span className="text-white/80 font-medium">
+                                {fp.frameTitle}
+                              </span>
+                              <span className="text-white/40 ml-2">
+                                ({fp.duration}s)
+                              </span>
                               <p className="mt-0.5 line-clamp-2">{fp.prompt}</p>
                             </div>
                           ))}
                         </div>
                       </div>
 
-                      {/* Technical notes */}
                       <div>
-                        <span className="text-[10px] text-white/40 uppercase tracking-wider">Technical</span>
+                        <span className="text-[10px] text-white/40 uppercase tracking-wider">
+                          Technical
+                        </span>
                         <p className="text-[10px] text-white/50 mt-1">
                           {generatedPrompt.technicalNotes}
                         </p>
                       </div>
 
-                      {/* Copy button */}
                       <button
                         onClick={handleCopyPrompt}
                         className="w-full py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white/70 transition-all flex items-center justify-center gap-2"
@@ -492,19 +639,22 @@ export function AIPanel({
             >
               <div className="flex items-center justify-between mb-3">
                 <span className="text-xs font-medium text-white/70">Selected</span>
-                <span className={cn(
-                  "text-[10px] px-2 py-0.5 rounded-full",
-                  selectedFrame.status === "polished"
-                    ? "bg-emerald-500/10 text-emerald-400"
-                    : "bg-white/5 text-white/40"
-                )}>
-                  {selectedFrame.status === "polished" ? 'Ready' : 'Draft'}
+                <span
+                  className={cn(
+                    "text-[10px] px-2 py-0.5 rounded-full",
+                    selectedFrame.status === "polished"
+                      ? "bg-emerald-500/10 text-emerald-400"
+                      : "bg-white/5 text-white/40"
+                  )}
+                >
+                  {selectedFrame.status === "polished" ? "Ready" : "Draft"}
                 </span>
               </div>
 
-              <p className="text-sm text-white mb-3">{selectedFrame.title || 'Untitled'}</p>
+              <p className="text-sm text-white mb-3">
+                {selectedFrame.title || "Untitled"}
+              </p>
 
-              {/* Duration slider */}
               <div className="mb-3">
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-[10px] text-white/40">Duration</span>
@@ -518,16 +668,19 @@ export function AIPanel({
                   max={5000}
                   step={100}
                   value={selectedFrame.durationMs || 2000}
-                  onChange={(e) => onDurationChange?.(selectedFrame.id, Number(e.target.value))}
+                  onChange={(e) =>
+                    onDurationChange?.(selectedFrame.id, Number(e.target.value))
+                  }
                   className="w-full h-1 bg-white/10 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-pink-400 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer"
                 />
               </div>
 
-              {/* Motion notes */}
               {selectedFrame.motionNotes && (
                 <div>
                   <span className="text-[10px] text-white/40">Motion</span>
-                  <p className="text-xs text-white/60 mt-1 italic">"{selectedFrame.motionNotes}"</p>
+                  <p className="text-xs text-white/60 mt-1 italic">
+                    "{selectedFrame.motionNotes}"
+                  </p>
                 </div>
               )}
             </motion.div>
@@ -552,8 +705,14 @@ export function AIPanel({
               ↓ Video
             </button>
             <button
-              onClick={() => {
-                navigator.clipboard.writeText(`${window.location.origin}/board/${boardId}`);
+              onClick={async () => {
+                try {
+                  // Make sure this matches your actual public route
+                  const url = `${window.location.origin}/board/${boardId}`;
+                  await navigator.clipboard.writeText(url);
+                } catch {
+                  setError("Clipboard blocked. Copy link from address bar.");
+                }
               }}
               className="w-10 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/70 transition-all flex items-center justify-center"
             >
