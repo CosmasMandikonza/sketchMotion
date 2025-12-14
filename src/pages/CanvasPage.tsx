@@ -829,7 +829,7 @@ export function CanvasPage() {
     const frameWidth = 220;
     const frameHeight = 180;
     const gapX = 80;
-    const gapY = 100;  // Increased gap between chains
+    const gapY = 100;  // Gap between rows/chains
     const startX = 100;
     const startY = 120;
 
@@ -837,13 +837,35 @@ export function CanvasPage() {
     const positionUpdates: Array<{ id: string; x: number; y: number }> = [];
 
     if (connections.length > 0) {
-      // Get separate chains for visual grouping
-      const chains = getConnectionChains();
+      // Build a proper linear chain following connections in order
+      // Find the root frames (frames that are NOT targets of any connection)
+      const targetIds = new Set(connections.map(c => c.to));
+      const rootFrames = frames.filter(f => !targetIds.has(f.id));
 
+      const visited = new Set<string>();
       let currentY = startY;
 
-      // Arrange each chain on its own row
-      chains.forEach((chain) => {
+      // Process each chain starting from root frames
+      rootFrames.forEach(rootFrame => {
+        if (visited.has(rootFrame.id)) return;
+
+        // Build linear chain by following connections one by one
+        const chain: Frame[] = [];
+        let currentFrameId: string | null = rootFrame.id;
+
+        while (currentFrameId && !visited.has(currentFrameId)) {
+          const frame = frames.find(f => f.id === currentFrameId);
+          if (!frame) break;
+
+          visited.add(currentFrameId);
+          chain.push(frame);
+
+          // Find the next frame in the sequence (first outgoing connection)
+          const nextConnection = connections.find(c => c.from === currentFrameId);
+          currentFrameId = nextConnection?.to || null;
+        }
+
+        // Position all frames in this chain on a single horizontal row
         chain.forEach((frame, colIndex) => {
           const x = startX + colIndex * (frameWidth + gapX);
           const y = currentY;
@@ -851,8 +873,20 @@ export function CanvasPage() {
         });
 
         // Move to next row for the next chain
-        currentY += frameHeight + gapY;
+        if (chain.length > 0) {
+          currentY += frameHeight + gapY;
+        }
       });
+
+      // Handle any orphan frames (not connected to anything)
+      const orphans = frames.filter(f => !visited.has(f.id));
+      if (orphans.length > 0) {
+        orphans.forEach((frame, colIndex) => {
+          const x = startX + colIndex * (frameWidth + gapX);
+          const y = currentY;
+          positionUpdates.push({ id: frame.id, x, y });
+        });
+      }
     } else {
       // No connections - arrange in grid
       const cols = Math.ceil(Math.sqrt(frames.length));
@@ -876,7 +910,7 @@ export function CanvasPage() {
     await refreshBoard();
 
     success("✨ Frames arranged");
-  }, [frames, connections, getConnectionChains, updateFramePosition, refreshBoard, success]);
+  }, [frames, connections, updateFramePosition, refreshBoard, success]);
 
   // Handle preview
   const handlePreview = useCallback(() => {
