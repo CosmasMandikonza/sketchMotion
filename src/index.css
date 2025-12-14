@@ -104,10 +104,10 @@
     @apply bg-white/10 backdrop-blur-xl border border-white/20 shadow-xl;
   }
   .glass-card {
-    @apply bg-white/8 backdrop-blur-xl border border-white/15 shadow-2xl;
+    @apply bg-white/10 backdrop-blur-xl border border-white/20 shadow-2xl;
   }
   .glass-panel {
-    @apply bg-white/12 backdrop-blur-2xl border border-white/20 shadow-xl;
+    @apply bg-white/10 backdrop-blur-2xl border border-white/20 shadow-xl;
   }
   .glass-dark {
     @apply bg-black/20 backdrop-blur-xl border border-white/10 shadow-xl;
@@ -323,4 +323,15 @@
 
 .animate-pulse-dot-3 {
   animation: pulse-dot 1.4s ease-in-out infinite 0.4s;
+}
+
+/* Loading bar animation for AI polish */
+@keyframes loading {
+  0% { transform: translateX(-100%); }
+  50% { transform: translateX(0%); }
+  100% { transform: translateX(100%); }
+}
+
+.animate-loading {
+  animation: loading 2s ease-in-out infinite;
 }

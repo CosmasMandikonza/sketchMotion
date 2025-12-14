@@ -1,35 +1,31 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { GlassPanel } from "@/components/layout/GlassPanel";
-import { GlassCard } from "@/components/layout/GlassCard";
-import { Button } from "@/components/ui/button";
-import { Progress } from "@/components/ui/progress";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Wand2,
-  Film,
-  Sparkles,
-  Check,
-  X,
   Play,
-  Pause,
-  RotateCcw,
-  ChevronRight,
   Loader2,
-  Image,
-  Settings2,
-  Info,
+  Link2,
+  Sparkles,
+  Copy,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Wand2,
+  FileText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-type WorkflowStep = "sketch" | "polish" | "animate";
-type ProcessingState = "idle" | "processing" | "complete" | "error";
+import { generateStoryboardVideoPrompt } from "@/lib/googleAI";
+import { generateVideoFromFrame } from "@/lib/videoGeneration";
 
 interface Frame {
   id: string;
   title?: string;
   status: "sketch" | "polished";
+  durationMs?: number;
+  motionNotes?: string;
+  thumbnail?: string;
+  polishedDataUrl?: string;
+  sketchDataUrl?: string;
 }
 
 interface AIPanelProps {
@@ -39,434 +35,533 @@ interface AIPanelProps {
   onAnimate: () => void;
   isPolishing?: boolean;
   hasPolishedFrames?: boolean;
+  onDuplicate?: (frameId: string) => void;
+  onDelete?: (frameId: string) => void;
+  onDurationChange?: (frameId: string, durationMs: number) => void;
+  onSelectFrame?: (frameId: string) => void;
+  onPreview?: () => void;
 }
 
-export function AIPanel({ 
-  selectedFrames, 
+type VideoStyle = 'Cinematic' | 'Animated' | 'Realistic' | 'Stylized';
+
+interface GeneratedPrompt {
+  masterPrompt: string;
+  framePrompts: Array<{ frameTitle: string; prompt: string; duration: number }>;
+  totalDuration: number;
+  technicalNotes: string;
+}
+
+export function AIPanel({
+  selectedFrames,
   frames,
-  onPolish, 
   onAnimate,
-  isPolishing = false,
-  hasPolishedFrames = false,
+  onDurationChange,
+  onSelectFrame,
+  onPreview,
 }: AIPanelProps) {
   const navigate = useNavigate();
   const { boardId } = useParams();
-  const [activeStep, setActiveStep] = useState<WorkflowStep>("sketch");
-  const [polishState, setPolishState] = useState<ProcessingState>("idle");
-  const [animateState, setAnimateState] = useState<ProcessingState>("idle");
-  const [polishProgress, setPolishProgress] = useState(0);
-  const [animateProgress, setAnimateProgress] = useState(0);
+
+  // Generation state
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generationStep, setGenerationStep] = useState<'idle' | 'analyzing' | 'prompting' | 'generating' | 'complete'>('idle');
+  const [generationProgress, setGenerationProgress] = useState(0);
+  const [selectedStyle, setSelectedStyle] = useState<VideoStyle>("Cinematic");
+
+  // Generated prompt state
+  const [generatedPrompt, setGeneratedPrompt] = useState<GeneratedPrompt | null>(null);
+  const [showPromptDetails, setShowPromptDetails] = useState(false);
+  const [promptCopied, setPromptCopied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Count frames by status
-  const sketchFrames = frames.filter(f => f.status === "sketch").length;
-  const polishedFrames = frames.filter(f => f.status === "polished").length;
-  const selectedSketchFrames = frames.filter(f => selectedFrames.includes(f.id) && f.status === "sketch").length;
-  const selectedPolishedFrames = frames.filter(f => selectedFrames.includes(f.id) && f.status === "polished").length;
+  const polishedCount = frames.filter(f => f.status === "polished").length;
+  const totalFrames = frames.length;
 
-  const handlePolish = () => {
-    if (selectedFrames.length === 0) return;
-    
-    setPolishState("processing");
-    setPolishProgress(0);
-    
-    // Simulate progress
-    const interval = setInterval(() => {
-      setPolishProgress((prev) => {
-        if (prev >= 100) {
-          clearInterval(interval);
-          setPolishState("complete");
-          setActiveStep("polish");
-          return 100;
-        }
-        return prev + 10;
+  // Calculate total duration
+  const totalDuration = frames.reduce((acc, f) => acc + (f.durationMs || 2000), 0) / 1000;
+
+  // Get selected frame details
+  const selectedFrame = selectedFrames.length === 1
+    ? frames.find(f => f.id === selectedFrames[0])
+    : null;
+
+  // Check if ready to generate
+  const canGenerate = polishedCount === totalFrames && totalFrames > 0 && !isGenerating;
+
+  // Reset generation state when frames change significantly
+  useEffect(() => {
+    if (generatedPrompt && generationStep === 'complete') {
+      // If frames changed after generation, mark as stale
+      const currentDuration = frames.reduce((acc, f) => acc + (f.durationMs || 2000), 0) / 1000;
+      if (Math.abs(currentDuration - generatedPrompt.totalDuration) > 0.5) {
+        setGeneratedPrompt(null);
+        setGenerationStep('idle');
+      }
+    }
+  }, [frames, generatedPrompt, generationStep]);
+
+  const handleGenerateVideo = async () => {
+    if (!canGenerate) return;
+
+    setIsGenerating(true);
+    setError(null);
+    setGenerationProgress(0);
+    setGenerationStep('analyzing');
+
+    try {
+      // Step 1: Analyzing frames (0-20%)
+      setGenerationProgress(10);
+
+      // Prepare frames data
+      const orderedFrames = frames.map((f, index) => ({
+        title: f.title || `Frame ${index + 1}`,
+        imageUrl: f.polishedDataUrl || f.sketchDataUrl || f.thumbnail || '',
+        durationMs: f.durationMs || 2000,
+        motionNotes: f.motionNotes,
+        order: index,
+      })).filter(f => f.imageUrl);
+
+      if (orderedFrames.length === 0) {
+        throw new Error("No frame images available");
+      }
+
+      // Find first polished frame for video generation
+      const firstPolishedFrame = orderedFrames.find(f => f.imageUrl);
+      if (!firstPolishedFrame?.imageUrl) {
+        throw new Error("No polished frames available");
+      }
+
+      setGenerationProgress(20);
+      setGenerationStep('prompting');
+
+      // Step 2: Generate prompt (20-40%)
+      const promptResult = await generateStoryboardVideoPrompt(orderedFrames, selectedStyle);
+      setGeneratedPrompt(promptResult);
+      setGenerationProgress(40);
+
+      setGenerationStep('generating');
+
+      // Step 3: Convert image to base64 and generate video with Veo via Supabase Edge Function
+      const imageResponse = await fetch(firstPolishedFrame.imageUrl);
+      const blob = await imageResponse.blob();
+      const imageBase64 = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.readAsDataURL(blob);
       });
-    }, 180);
-    
-    onPolish();
+
+      const videoResult = await generateVideoFromFrame(
+        promptResult?.masterPrompt || 'Animate this scene with smooth motion',
+        imageBase64,
+        Math.round((firstPolishedFrame.durationMs || 2000) / 1000),
+        (progress, status) => {
+          setGenerationProgress(40 + (progress * 0.6)); // Scale 0-100 to 40-100
+          console.log(`[Video Gen] ${status}: ${progress}%`);
+        }
+      );
+
+      setGenerationProgress(100);
+
+      if (videoResult.status === 'done' && videoResult.videoUrl) {
+        // Store video URL for export page
+        sessionStorage.setItem('generatedVideoUrl', videoResult.videoUrl);
+        sessionStorage.setItem('generatedVideoPrompt', promptResult.masterPrompt);
+
+        setGenerationStep('complete');
+        onAnimate();
+
+        // Navigate to export after short delay
+        setTimeout(() => {
+          navigate(`/export/${boardId}`);
+        }, 1500);
+
+      } else if (videoResult.status === 'error') {
+        // Error from edge function
+        setGenerationStep('complete');
+        setError(videoResult.error || 'Video generation failed');
+        // Still store prompt for manual use
+        sessionStorage.setItem('generatedVideoPrompt', promptResult.masterPrompt);
+
+      } else {
+        // Unknown status - still show the prompt
+        setGenerationStep('complete');
+        console.warn("Video generation:", videoResult);
+        sessionStorage.setItem('generatedVideoPrompt', promptResult.masterPrompt);
+        // Navigate to export anyway - they can use the prompt
+        setTimeout(() => {
+          navigate(`/export/${boardId}`);
+        }, 1500);
+      }
+
+    } catch (err) {
+      console.error("Generation failed:", err);
+      setError(err instanceof Error ? err.message : "Generation failed");
+      setGenerationStep('idle');
+    } finally {
+      setIsGenerating(false);
+    }
   };
 
-  const handleAnimate = () => {
-    if (!hasPolishedFrames && selectedPolishedFrames === 0) return;
-    
-    setAnimateState("processing");
-    setAnimateProgress(0);
-    
-    // Simulate progress
-    const interval = setInterval(() => {
-      setAnimateProgress((prev) => {
-        if (prev >= 100) {
-          clearInterval(interval);
-          setAnimateState("complete");
-          setActiveStep("animate");
-          return 100;
-        }
-        return prev + 5;
-      });
-    }, 100);
-    
-    onAnimate();
+  const handleCopyPrompt = async () => {
+    if (!generatedPrompt) return;
+
+    const fullPrompt = `MASTER PROMPT:\n${generatedPrompt.masterPrompt}\n\nFRAME PROMPTS:\n${generatedPrompt.framePrompts.map((fp, i) => `${i + 1}. ${fp.frameTitle} (${fp.duration}s):\n${fp.prompt}`).join('\n\n')}\n\nTECHNICAL NOTES:\n${generatedPrompt.technicalNotes}`;
+
+    await navigator.clipboard.writeText(fullPrompt);
+    setPromptCopied(true);
+    setTimeout(() => setPromptCopied(false), 2000);
   };
 
-  const resetWorkflow = () => {
-    setActiveStep("sketch");
-    setPolishState("idle");
-    setAnimateState("idle");
-    setPolishProgress(0);
-    setAnimateProgress(0);
+  const handleExportToPDF = () => {
+    navigate(`/export/${boardId}`);
+  };
+
+  const styles: VideoStyle[] = ['Cinematic', 'Animated', 'Realistic', 'Stylized'];
+
+  const getStepLabel = () => {
+    switch (generationStep) {
+      case 'analyzing': return 'Analyzing frames...';
+      case 'prompting': return 'Crafting video prompt...';
+      case 'generating': return 'Generating video...';
+      case 'complete': return 'Ready!';
+      default: return '';
+    }
   };
 
   return (
-    <GlassPanel position="right" className="fixed right-4 top-20 bottom-4 w-80 flex flex-col z-40">
-      <Tabs defaultValue="ai" className="flex-1 flex flex-col">
-        <TabsList className="mx-4 mt-4 bg-white/10">
-          <TabsTrigger value="ai" className="flex-1 data-[state=active]:bg-white/20">
-            <Sparkles className="w-4 h-4 mr-2" />
-            AI Workflow
-          </TabsTrigger>
-          <TabsTrigger value="properties" className="flex-1 data-[state=active]:bg-white/20">
-            <Settings2 className="w-4 h-4 mr-2" />
-            Properties
-          </TabsTrigger>
-        </TabsList>
+    <div className="fixed right-4 top-20 bottom-4 w-72 z-40 bg-[#0f0f1a]/90 backdrop-blur-xl border border-white/[0.08] rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.4)] overflow-hidden flex flex-col">
+      <div className="flex-1 overflow-y-auto">
 
-        <TabsContent value="ai" className="flex-1 flex flex-col p-4 space-y-4 overflow-auto">
-          {/* Workflow Steps Indicator */}
-          <div className="flex items-center justify-between mb-2">
-            {/* Step 1: Sketch */}
-            <div className="flex flex-col items-center">
-              <div
-                className={cn(
-                  "w-10 h-10 rounded-xl flex items-center justify-center transition-all",
-                  activeStep === "sketch"
-                    ? "bg-sm-pink text-white shadow-glow"
-                    : "bg-white/10 text-white/60"
-                )}
+        {/* Sequence Strip */}
+        <div className="p-4 border-b border-white/10">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-medium text-white/70">Sequence</span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={onPreview}
+                disabled={totalFrames === 0}
+                className="p-1 hover:bg-white/10 rounded transition-colors disabled:opacity-30"
               >
-                <Image className="w-5 h-5" />
-              </div>
-              <span className="text-xs text-white/60 mt-1">Sketch</span>
-              <span className="text-[10px] text-white/40">{sketchFrames} frames</span>
-            </div>
-
-            <ChevronRight className="w-4 h-4 text-white/30" />
-
-            {/* Step 2: Polish */}
-            <div className="flex flex-col items-center">
-              <div
-                className={cn(
-                  "w-10 h-10 rounded-xl flex items-center justify-center transition-all",
-                  activeStep === "polish"
-                    ? "bg-sm-soft-purple text-white shadow-glow"
-                    : polishState === "complete" || polishedFrames > 0
-                    ? "bg-sm-mint/20 text-sm-mint"
-                    : "bg-white/10 text-white/60"
-                )}
-              >
-                {isPolishing || polishState === "processing" ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                ) : polishState === "complete" || polishedFrames > 0 ? (
-                  <Check className="w-5 h-5" />
-                ) : (
-                  <Wand2 className="w-5 h-5" />
-                )}
-              </div>
-              <span className="text-xs text-white/60 mt-1">Polish</span>
-              <span className="text-[10px] text-white/40">{polishedFrames} frames</span>
-            </div>
-
-            <ChevronRight className="w-4 h-4 text-white/30" />
-
-            {/* Step 3: Animate */}
-            <div className="flex flex-col items-center">
-              <div
-                className={cn(
-                  "w-10 h-10 rounded-xl flex items-center justify-center transition-all",
-                  activeStep === "animate"
-                    ? "bg-sm-magenta text-white shadow-glow animate-pulse-glow"
-                    : animateState === "complete"
-                    ? "bg-sm-mint/20 text-sm-mint"
-                    : "bg-white/10 text-white/60"
-                )}
-              >
-                {animateState === "processing" ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
-                ) : animateState === "complete" ? (
-                  <Check className="w-5 h-5" />
-                ) : (
-                  <Film className="w-5 h-5" />
-                )}
-              </div>
-              <span className="text-xs text-white/60 mt-1">Animate</span>
+                <Play className="w-4 h-4 text-white/70" />
+              </button>
+              <span className="text-xs font-mono text-white/50">{totalDuration.toFixed(1)}s</span>
             </div>
           </div>
 
-          {/* Step 1: Sketch Explanation */}
-          <GlassCard variant="dark" className="p-4">
-            <div className="flex items-start gap-3">
-              <div className="w-8 h-8 rounded-lg bg-sm-pink/20 flex items-center justify-center flex-shrink-0">
-                <Info className="w-4 h-4 text-sm-pink" />
+          {/* Mini frame strip */}
+          {totalFrames > 0 ? (
+            <>
+              <div className="flex gap-1.5 overflow-x-auto pb-1">
+                {frames.map((frame) => (
+                  <button
+                    key={frame.id}
+                    onClick={() => onSelectFrame?.(frame.id)}
+                    className={cn(
+                      "flex-shrink-0 w-14 h-10 rounded-md border transition-all relative overflow-hidden",
+                      selectedFrames.includes(frame.id)
+                        ? "border-pink-500 ring-1 ring-pink-500/30"
+                        : "border-white/10 hover:border-white/20"
+                    )}
+                  >
+                    {frame.thumbnail || frame.polishedDataUrl || frame.sketchDataUrl ? (
+                      <img
+                        src={frame.thumbnail || frame.polishedDataUrl || frame.sketchDataUrl}
+                        className="w-full h-full object-cover"
+                        alt=""
+                      />
+                    ) : (
+                      <div className="w-full h-full bg-white/5" />
+                    )}
+                    {/* Status dot */}
+                    <div className={cn(
+                      "absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full",
+                      frame.status === "polished" ? "bg-emerald-400" : "bg-white/20"
+                    )} />
+                  </button>
+                ))}
               </div>
-              <div>
-                <h4 className="font-semibold text-white text-sm mb-1">Step 1: Sketch</h4>
-                <p className="text-xs text-white/60 leading-relaxed">
-                  Create frames on the canvas by clicking anywhere. Connect them with arrows to define your story sequence.
-                </p>
-              </div>
-            </div>
-          </GlassCard>
 
-          {/* Selection Info */}
-          <GlassCard variant="dark" className="p-4">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm text-white/70">Selected Frames</span>
-              <span className="text-sm font-semibold text-white">
-                {selectedFrames.length} frames
-              </span>
-            </div>
-            {selectedFrames.length === 0 ? (
-              <p className="text-xs text-white/50">
-                Select frames on the canvas to start the AI workflow
+              <p className="text-[10px] text-white/40 mt-2">
+                {polishedCount}/{totalFrames} polished
               </p>
-            ) : (
-              <div className="flex gap-2 text-xs">
-                <span className="px-2 py-1 rounded bg-white/10 text-white/70">
-                  {selectedSketchFrames} sketch
-                </span>
-                <span className="px-2 py-1 rounded bg-sm-mint/20 text-sm-mint">
-                  {selectedPolishedFrames} polished
-                </span>
-              </div>
-            )}
-          </GlassCard>
-
-          {/* Step 2: Polish Section */}
-          <GlassCard variant="dark" className="p-4">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-sm-soft-purple to-sm-purple flex items-center justify-center">
-                <Wand2 className="w-5 h-5 text-white" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-white">Step 2: AI Polish</h3>
-                <p className="text-xs text-white/60">Clean & style your sketches</p>
-              </div>
+            </>
+          ) : (
+            <div className="h-12 rounded-md border border-dashed border-white/10 flex items-center justify-center">
+              <span className="text-[10px] text-white/30">Add frames to canvas</span>
             </div>
-
-            <AnimatePresence mode="wait">
-              {(polishState === "idle" && !isPolishing) && (
-                <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                >
-                  <Button
-                    onClick={handlePolish}
-                    disabled={selectedFrames.length === 0 || selectedSketchFrames === 0}
-                    className="w-full bg-sm-soft-purple hover:bg-sm-soft-purple/90 text-white font-semibold"
-                  >
-                    <Wand2 className="w-4 h-4 mr-2" />
-                    Polish {selectedSketchFrames > 0 ? `${selectedSketchFrames} Frames` : "Selected Frames"}
-                  </Button>
-                  {selectedFrames.length > 0 && selectedSketchFrames === 0 && (
-                    <p className="text-xs text-white/40 mt-2 text-center">
-                      Selected frames are already polished
-                    </p>
-                  )}
-                </motion.div>
-              )}
-
-              {(polishState === "processing" || isPolishing) && (
-                <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  className="space-y-2"
-                >
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-white/70">AI is polishing...</span>
-                    <span className="text-white font-mono">{polishProgress}%</span>
-                  </div>
-                  <Progress value={polishProgress} className="h-2" />
-                  <p className="text-xs text-white/50 text-center">
-                    Aligning art style across frames
-                  </p>
-                </motion.div>
-              )}
-
-              {polishState === "complete" && !isPolishing && (
-                <motion.div
-                  initial={{ opacity: 0, scale: 0.95 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0 }}
-                  className="space-y-3"
-                >
-                  <div className="flex items-center gap-2 text-sm-mint">
-                    <Check className="w-4 h-4" />
-                    <span className="font-medium">Polish Complete!</span>
-                  </div>
-                  <div className="flex gap-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="flex-1 border-white/20 text-white hover:bg-white/10"
-                      onClick={resetWorkflow}
-                    >
-                      <X className="w-4 h-4 mr-1" />
-                      Reset
-                    </Button>
-                    <Button
-                      size="sm"
-                      className="flex-1 bg-sm-mint/20 text-sm-mint hover:bg-sm-mint/30"
-                    >
-                      <Check className="w-4 h-4 mr-1" />
-                      Accept
-                    </Button>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </GlassCard>
-
-          {/* Step 3: Animate Section */}
-          <GlassCard variant="dark" className="p-4">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-sm-magenta to-sm-pink flex items-center justify-center">
-                <Film className="w-5 h-5 text-white" />
-              </div>
-              <div>
-                <h3 className="font-semibold text-white">Step 3: AI Animate</h3>
-                <p className="text-xs text-white/60">Generate video from sequence</p>
-              </div>
-            </div>
-
-            <AnimatePresence mode="wait">
-              {animateState === "idle" && (
-                <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                >
-                  <Button
-                    onClick={handleAnimate}
-                    disabled={!hasPolishedFrames && selectedPolishedFrames === 0}
-                    className="w-full bg-sm-magenta hover:bg-sm-magenta/90 text-white font-semibold shadow-glow hover:shadow-glow-lg transition-all btn-press"
-                  >
-                    <Film className="w-4 h-4 mr-2" />
-                    Generate Animation
-                  </Button>
-                  {!hasPolishedFrames && selectedPolishedFrames === 0 && (
-                    <p className="text-xs text-white/40 mt-2 text-center">
-                      Polish frames first to enable animation
-                    </p>
-                  )}
-                </motion.div>
-              )}
-
-              {animateState === "processing" && (
-                <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  className="space-y-2"
-                >
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-white/70">Generating...</span>
-                    <span className="text-white font-mono">{animateProgress}%</span>
-                  </div>
-                  <Progress value={animateProgress} className="h-2" />
-                  <p className="text-xs text-white/50 text-center">
-                    Creating smooth transitions
-                  </p>
-                </motion.div>
-              )}
-
-              {animateState === "complete" && (
-                <motion.div
-                  initial={{ opacity: 0, scale: 0.95 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  exit={{ opacity: 0 }}
-                  className="space-y-3"
-                >
-                  {/* Video Preview */}
-                  <div className="aspect-video rounded-lg bg-sm-charcoal/50 flex items-center justify-center relative overflow-hidden">
-                    <div className="absolute inset-0 bg-gradient-to-br from-sm-pink/20 to-sm-purple/20" />
-                    <Button
-                      size="icon"
-                      className="w-12 h-12 rounded-full bg-white/20 hover:bg-white/30 backdrop-blur-sm"
-                    >
-                      <Play className="w-6 h-6 text-white" />
-                    </Button>
-                  </div>
-                  <div className="flex items-center gap-2 text-sm-mint">
-                    <Sparkles className="w-4 h-4" />
-                    <span className="font-medium">Animation Ready!</span>
-                  </div>
-                  <Button 
-                    className="w-full bg-sm-magenta hover:bg-sm-magenta/90 text-white"
-                    onClick={() => navigate(`/export/${boardId}`)}
-                  >
-                    Export Video
-                  </Button>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </GlassCard>
-
-          {/* Reset Button */}
-          {(polishState !== "idle" || animateState !== "idle") && (
-            <Button
-              variant="ghost"
-              onClick={resetWorkflow}
-              className="text-white/60 hover:text-white hover:bg-white/10"
-            >
-              <RotateCcw className="w-4 h-4 mr-2" />
-              Reset Workflow
-            </Button>
           )}
-        </TabsContent>
+        </div>
 
-        <TabsContent value="properties" className="flex-1 p-4 overflow-auto">
-          <GlassCard variant="dark" className="p-4">
-            <h3 className="font-semibold text-white mb-4">Frame Properties</h3>
-            {selectedFrames.length === 0 ? (
-              <p className="text-sm text-white/50">
-                Select a frame to view its properties
-              </p>
-            ) : (
-              <div className="space-y-4">
-                <div>
-                  <label className="text-xs text-white/60 block mb-1">Duration</label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      defaultValue={1000}
-                      className="flex-1 h-9 px-3 rounded-lg bg-white/10 border border-white/20 text-white text-sm"
-                    />
-                    <span className="text-sm text-white/60">ms</span>
-                  </div>
+        {/* Video Generation */}
+        <div className="p-4 border-b border-white/10">
+          <div className="flex items-center gap-2 mb-3">
+            <Wand2 className="w-4 h-4 text-pink-400" />
+            <span className="text-xs font-medium text-white/70">Generate Video</span>
+          </div>
+
+          {/* Style selector */}
+          <div className="grid grid-cols-2 gap-1.5 mb-4">
+            {styles.map(style => (
+              <button
+                key={style}
+                onClick={() => setSelectedStyle(style)}
+                disabled={isGenerating}
+                className={cn(
+                  "py-1.5 px-2 rounded-lg text-xs font-medium transition-all",
+                  selectedStyle === style
+                    ? "bg-pink-500/20 text-pink-300 border border-pink-500/30"
+                    : "bg-white/5 text-white/50 border border-transparent hover:text-white/70 hover:bg-white/10",
+                  isGenerating && "opacity-50 cursor-not-allowed"
+                )}
+              >
+                {style}
+              </button>
+            ))}
+          </div>
+
+          {/* Progress bar (when generating) */}
+          <AnimatePresence>
+            {isGenerating && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                className="mb-4"
+              >
+                <div className="flex justify-between text-[10px] mb-1.5">
+                  <span className="text-white/50">{getStepLabel()}</span>
+                  <span className="text-white/70 font-mono">{generationProgress}%</span>
                 </div>
-                <div>
-                  <label className="text-xs text-white/60 block mb-1">Transition</label>
-                  <select className="w-full h-9 px-3 rounded-lg bg-white/10 border border-white/20 text-white text-sm">
-                    <option value="fade">Fade</option>
-                    <option value="slide">Slide</option>
-                    <option value="zoom">Zoom</option>
-                    <option value="none">None</option>
-                  </select>
+                <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
+                  <motion.div
+                    className="h-full bg-gradient-to-r from-pink-500 to-rose-500"
+                    initial={{ width: 0 }}
+                    animate={{ width: `${generationProgress}%` }}
+                    transition={{ ease: "easeOut" }}
+                  />
                 </div>
-                <div>
-                  <label className="text-xs text-white/60 block mb-1">Easing</label>
-                  <select className="w-full h-9 px-3 rounded-lg bg-white/10 border border-white/20 text-white text-sm">
-                    <option value="ease">Ease</option>
-                    <option value="ease-in">Ease In</option>
-                    <option value="ease-out">Ease Out</option>
-                    <option value="linear">Linear</option>
-                  </select>
-                </div>
-              </div>
+              </motion.div>
             )}
-          </GlassCard>
-        </TabsContent>
-      </Tabs>
-    </GlassPanel>
+          </AnimatePresence>
+
+          {/* Generate button */}
+          <button
+            onClick={handleGenerateVideo}
+            disabled={!canGenerate}
+            className={cn(
+              "w-full py-2.5 rounded-xl font-medium text-sm transition-all flex items-center justify-center gap-2",
+              canGenerate
+                ? "bg-gradient-to-r from-pink-500 to-rose-500 text-white hover:shadow-[0_4px_20px_rgba(236,72,153,0.3)] hover:scale-[1.02] active:scale-[0.98]"
+                : "bg-white/5 text-white/30 cursor-not-allowed"
+            )}
+          >
+            {isGenerating ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Generating...
+              </>
+            ) : generationStep === 'complete' ? (
+              <>
+                <Check className="w-4 h-4" />
+                Regenerate
+              </>
+            ) : (
+              <>
+                <Sparkles className="w-4 h-4" />
+                Generate Video
+              </>
+            )}
+          </button>
+
+          <p className="text-[10px] text-white/40 text-center mt-2">
+            Powered by Gemini + Veo 3
+          </p>
+
+          {/* Error message */}
+          {error && (
+            <p className="text-[10px] text-red-400 text-center mt-2">
+              {error}
+            </p>
+          )}
+
+          {/* Warning if frames not ready */}
+          {polishedCount < totalFrames && totalFrames > 0 && !isGenerating && (
+            <p className="text-[10px] text-amber-400/70 text-center mt-2">
+              Polish {totalFrames - polishedCount} frame{totalFrames - polishedCount > 1 ? 's' : ''} first
+            </p>
+          )}
+        </div>
+
+        {/* Generated Prompt (when complete) */}
+        <AnimatePresence>
+          {generatedPrompt && generationStep === 'complete' && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="border-b border-white/10"
+            >
+              <div className="p-4">
+                <button
+                  onClick={() => setShowPromptDetails(!showPromptDetails)}
+                  className="w-full flex items-center justify-between text-xs font-medium text-white/70 hover:text-white/90 transition-colors"
+                >
+                  <div className="flex items-center gap-2">
+                    <FileText className="w-4 h-4 text-emerald-400" />
+                    <span>AI Video Prompt</span>
+                  </div>
+                  {showPromptDetails ? (
+                    <ChevronUp className="w-4 h-4" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4" />
+                  )}
+                </button>
+
+                <AnimatePresence>
+                  {showPromptDetails && (
+                    <motion.div
+                      initial={{ opacity: 0, height: 0 }}
+                      animate={{ opacity: 1, height: 'auto' }}
+                      exit={{ opacity: 0, height: 0 }}
+                      className="mt-3 space-y-3"
+                    >
+                      {/* Master prompt */}
+                      <div>
+                        <span className="text-[10px] text-white/40 uppercase tracking-wider">Master Prompt</span>
+                        <p className="text-xs text-white/80 mt-1 leading-relaxed">
+                          {generatedPrompt.masterPrompt}
+                        </p>
+                      </div>
+
+                      {/* Frame prompts */}
+                      <div>
+                        <span className="text-[10px] text-white/40 uppercase tracking-wider">Scene Breakdown</span>
+                        <div className="mt-1 space-y-2 max-h-32 overflow-y-auto">
+                          {generatedPrompt.framePrompts.map((fp, i) => (
+                            <div key={i} className="text-[10px] text-white/60 bg-white/5 rounded-lg p-2">
+                              <span className="text-white/80 font-medium">{fp.frameTitle}</span>
+                              <span className="text-white/40 ml-2">({fp.duration}s)</span>
+                              <p className="mt-0.5 line-clamp-2">{fp.prompt}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Technical notes */}
+                      <div>
+                        <span className="text-[10px] text-white/40 uppercase tracking-wider">Technical</span>
+                        <p className="text-[10px] text-white/50 mt-1">
+                          {generatedPrompt.technicalNotes}
+                        </p>
+                      </div>
+
+                      {/* Copy button */}
+                      <button
+                        onClick={handleCopyPrompt}
+                        className="w-full py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white/70 transition-all flex items-center justify-center gap-2"
+                      >
+                        {promptCopied ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            Copied!
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            Copy Full Prompt
+                          </>
+                        )}
+                      </button>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Selected Frame Details */}
+        <AnimatePresence>
+          {selectedFrame && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              className="p-4 border-b border-white/10"
+            >
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs font-medium text-white/70">Selected</span>
+                <span className={cn(
+                  "text-[10px] px-2 py-0.5 rounded-full",
+                  selectedFrame.status === "polished"
+                    ? "bg-emerald-500/10 text-emerald-400"
+                    : "bg-white/5 text-white/40"
+                )}>
+                  {selectedFrame.status === "polished" ? 'Ready' : 'Draft'}
+                </span>
+              </div>
+
+              <p className="text-sm text-white mb-3">{selectedFrame.title || 'Untitled'}</p>
+
+              {/* Duration slider */}
+              <div className="mb-3">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[10px] text-white/40">Duration</span>
+                  <span className="text-xs font-mono text-white/70">
+                    {((selectedFrame.durationMs || 2000) / 1000).toFixed(1)}s
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={500}
+                  max={5000}
+                  step={100}
+                  value={selectedFrame.durationMs || 2000}
+                  onChange={(e) => onDurationChange?.(selectedFrame.id, Number(e.target.value))}
+                  className="w-full h-1 bg-white/10 rounded-full appearance-none cursor-pointer [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:bg-pink-400 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:cursor-pointer"
+                />
+              </div>
+
+              {/* Motion notes */}
+              {selectedFrame.motionNotes && (
+                <div>
+                  <span className="text-[10px] text-white/40">Motion</span>
+                  <p className="text-xs text-white/60 mt-1 italic">"{selectedFrame.motionNotes}"</p>
+                </div>
+              )}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Export */}
+        <div className="p-4">
+          <span className="text-xs font-medium text-white/70">Export</span>
+
+          <div className="flex gap-2 mt-3">
+            <button
+              onClick={handleExportToPDF}
+              className="flex-1 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white/70 transition-all"
+            >
+              ↓ PDF
+            </button>
+            <button
+              onClick={() => navigate(`/export/${boardId}`)}
+              className="flex-1 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white/70 transition-all"
+            >
+              ↓ Video
+            </button>
+            <button
+              onClick={() => {
+                navigator.clipboard.writeText(`${window.location.origin}/board/${boardId}`);
+              }}
+              className="w-10 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/70 transition-all flex items-center justify-center"
+            >
+              <Link2 className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }

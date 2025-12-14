@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Link, useParams } from "react-router-dom";
 import { GradientBackground } from "@/components/layout/GradientBackground";
 import { GlassCard } from "@/components/layout/GlassCard";
@@ -34,19 +34,7 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-// Mock board data based on boardId
-const getBoardData = (boardId: string | undefined) => {
-  const boards: Record<string, { title: string; duration: string; durationSec: number; resolution: string }> = {
-    "1": { title: "Product Launch Animation", duration: "0:45", durationSec: 45, resolution: "1080p" },
-    "2": { title: "Explainer Video Storyboard", duration: "1:12", durationSec: 72, resolution: "1080p" },
-    "3": { title: "Social Media Campaign", duration: "0:30", durationSec: 30, resolution: "1080p" },
-    "4": { title: "App Onboarding Flow", duration: "0:58", durationSec: 58, resolution: "720p" },
-    "5": { title: "Brand Story Animation", duration: "2:15", durationSec: 135, resolution: "4K" },
-    "6": { title: "Tutorial Series", duration: "1:45", durationSec: 105, resolution: "1080p" },
-  };
-  return boards[boardId || "1"] || { title: "Untitled Board", duration: "0:45", durationSec: 45, resolution: "1080p" };
-};
+import { supabase } from "@/lib/supabase";
 
 // Preset configurations
 interface Preset {
@@ -66,43 +54,6 @@ const presets: Preset[] = [
   { id: "landscape", name: "Landscape HD", icon: Monitor, resolution: "1080p", aspectRatio: "16:9", dimensions: "1920×1080" },
 ];
 
-// Mock version history with more detail
-const versionHistory = [
-  {
-    id: "v3",
-    label: "v3 – Final",
-    name: "Final Export",
-    timestamp: "Today, 2:30 PM",
-    duration: "0:45",
-    durationSec: 45,
-    resolution: "1080p",
-    thumbnail: "https://images.unsplash.com/photo-1558655146-9f40138edfeb?w=200&q=80",
-    status: "current" as const,
-  },
-  {
-    id: "v2",
-    label: "v2 – Client feedback",
-    name: "Added transitions",
-    timestamp: "Today, 11:15 AM",
-    duration: "0:42",
-    durationSec: 42,
-    resolution: "1080p",
-    thumbnail: "https://images.unsplash.com/photo-1611532736597-de2d4265fba3?w=200&q=80",
-    status: "archived" as const,
-  },
-  {
-    id: "v1",
-    label: "v1 – First cut",
-    name: "Initial render",
-    timestamp: "Yesterday, 4:45 PM",
-    duration: "0:38",
-    durationSec: 38,
-    resolution: "720p",
-    thumbnail: "https://images.unsplash.com/photo-1626785774573-4b799315345d?w=200&q=80",
-    status: "archived" as const,
-  },
-];
-
 // Quality descriptions
 const getQualityDescription = (quality: number) => {
   if (quality >= 90) return "Archival quality – Best for final delivery";
@@ -113,7 +64,11 @@ const getQualityDescription = (quality: number) => {
 
 export function ExportPage() {
   const { boardId } = useParams();
-  const boardData = getBoardData(boardId);
+  
+  // Real data state
+  const [board, setBoard] = useState<any>(null);
+  const [videos, setVideos] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
   
   // Video player state
   const [isPlaying, setIsPlaying] = useState(false);
@@ -139,41 +94,67 @@ export function ExportPage() {
   const [linkCopied, setLinkCopied] = useState(false);
   
   // Version state
-  const [selectedVersion, setSelectedVersion] = useState("v3");
-  const [currentVersionData, setCurrentVersionData] = useState(versionHistory[0]);
+  const [selectedVersion, setSelectedVersion] = useState<string | null>(null);
 
-  // Update version data when selection changes
-  useEffect(() => {
-    const version = versionHistory.find(v => v.id === selectedVersion);
-    if (version) {
-      setCurrentVersionData(version);
-    }
-  }, [selectedVersion]);
+  // Video ref for custom player controls
+  const videoRef = useRef<HTMLVideoElement>(null);
 
-  // Simulate video playback
+  // Fetch board and videos
   useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (isPlaying) {
-      interval = setInterval(() => {
-        setPlaybackProgress(prev => {
-          if (prev >= 100) {
-            setIsPlaying(false);
-            return 0;
-          }
-          return prev + 2;
-        });
-        setCurrentTime(prev => {
-          const maxTime = currentVersionData.durationSec;
-          if (prev >= maxTime) {
-            setIsPlaying(false);
-            return 0;
-          }
-          return prev + (maxTime / 50);
-        });
-      }, 100);
+    async function fetchData() {
+      if (!boardId) return;
+      
+      // Get board
+      const { data: boardData } = await supabase
+        .from('boards')
+        .select('*')
+        .eq('id', boardId)
+        .single();
+      
+      if (boardData) setBoard(boardData);
+      
+      // Get videos for this board (version history)
+      const { data: videosData } = await supabase
+        .from('videos')
+        .select('*')
+        .eq('board_id', boardId)
+        .order('created_at', { ascending: false });
+      
+      if (videosData && videosData.length > 0) {
+        setVideos(videosData);
+        setSelectedVersion(videosData[0].id);
+      }
+      
+      // Also check sessionStorage for just-generated video
+      const newVideoUrl = sessionStorage.getItem('generatedVideoUrl');
+      if (newVideoUrl && (!videosData || !videosData.find(v => v.video_url === newVideoUrl))) {
+        // Save new video to database
+        const { data: newVideo } = await supabase
+          .from('videos')
+          .insert({
+            board_id: boardId,
+            video_url: newVideoUrl,
+            prompt: sessionStorage.getItem('generatedVideoPrompt'),
+            version_number: (videosData?.length || 0) + 1,
+            version_label: `v${(videosData?.length || 0) + 1}`,
+            status: 'completed'
+          })
+          .select()
+          .single();
+        
+        if (newVideo) {
+          setVideos([newVideo, ...(videosData || [])]);
+          setSelectedVersion(newVideo.id);
+          sessionStorage.removeItem('generatedVideoUrl');
+          sessionStorage.removeItem('generatedVideoPrompt');
+        }
+      }
+      
+      setLoading(false);
     }
-    return () => clearInterval(interval);
-  }, [isPlaying, currentVersionData.durationSec]);
+    
+    fetchData();
+  }, [boardId]);
 
   // Update resolution when preset changes
   useEffect(() => {
@@ -217,21 +198,38 @@ export function ExportPage() {
           setIsExporting(false);
           setExportComplete(true);
           // Generate filename
-          const sanitizedTitle = boardData.title.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+          const sanitizedTitle = (board?.name || 'untitled').toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
           setExportFilename(`sketchmotion-${sanitizedTitle}-${resolution}.${selectedFormat}`);
           return 100;
         }
         return prev + 5;
       });
     }, 80);
-  }, [boardData.title, resolution, selectedFormat]);
+  }, [board?.name, resolution, selectedFormat]);
+
+  // Get current video based on selection
+  const currentVideo = videos.find(v => v.id === selectedVersion) || videos[0];
 
   const handleDownload = useCallback(() => {
-    // Simulate download
-    console.log("Downloading:", exportFilename);
-  }, [exportFilename]);
+    if (currentVideo?.video_url) {
+      const a = document.createElement('a');
+      a.href = currentVideo.video_url;
+      a.download = exportFilename || 'sketchmotion-video.mp4';
+      a.click();
+    }
+  }, [currentVideo?.video_url, exportFilename]);
 
   const currentPreset = presets.find(p => p.id === selectedPreset);
+
+  if (loading) {
+    return (
+      <GradientBackground>
+        <div className="min-h-screen flex items-center justify-center">
+          <Loader2 className="w-8 h-8 animate-spin text-white/50" />
+        </div>
+      </GradientBackground>
+    );
+  }
 
   return (
     <GradientBackground>
@@ -262,15 +260,15 @@ export function ExportPage() {
               <span className="text-white/60 hidden sm:inline">SketchMotion</span>
               <ChevronRight className="w-4 h-4 text-white/40 hidden sm:inline" />
               <span className="font-display font-bold truncate max-w-[200px] sm:max-w-none">
-                {boardData.title}
+                {board?.name || 'Untitled Board'}
               </span>
             </div>
 
             <div className="flex items-center gap-2 text-sm text-white/60">
               <Film className="w-4 h-4" />
-              <span className="hidden sm:inline">{currentVersionData.duration}</span>
+              <span className="hidden sm:inline">{currentVideo?.duration_seconds || 6}s</span>
               <span className="hidden sm:inline">•</span>
-              <span>{currentVersionData.resolution}</span>
+              <span>{currentVideo?.resolution || '1080p'}</span>
             </div>
           </GlassCard>
         </header>
@@ -293,21 +291,35 @@ export function ExportPage() {
                   "aspect-video"
                 )}>
                   {/* Video Thumbnail/Preview */}
-                  <img
-                    src="https://images.unsplash.com/photo-1558655146-9f40138edfeb?w=800&q=80"
-                    alt="Video preview"
-                    className="w-full h-full object-cover"
-                  />
+                  {currentVideo?.video_url ? (
+                    <video
+                      ref={videoRef}
+                      src={currentVideo.video_url}
+                      className="w-full h-full object-cover"
+                      onTimeUpdate={(e) => {
+                        const video = e.currentTarget;
+                        setCurrentTime(video.currentTime);
+                        setPlaybackProgress((video.currentTime / video.duration) * 100);
+                      }}
+                      onEnded={() => setIsPlaying(false)}
+                      onPlay={() => setIsPlaying(true)}
+                      onPause={() => setIsPlaying(false)}
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center bg-white/5">
+                      <p className="text-white/40">No video selected</p>
+                    </div>
+                  )}
 
                   {/* Overlay with title and duration */}
                   <div className="absolute top-4 left-4 right-4 flex items-start justify-between">
                     <div className="px-3 py-1.5 rounded-lg bg-black/60 backdrop-blur-sm">
                       <p className="text-white text-sm font-medium truncate max-w-[200px]">
-                        {boardData.title}
+                        {board?.name || 'Untitled Board'}
                       </p>
                     </div>
                     <div className="px-2 py-1 rounded-md bg-black/60 backdrop-blur-sm text-white text-sm font-mono">
-                      {currentVersionData.duration}
+                      {currentVideo?.duration_seconds || 6}s
                     </div>
                   </div>
 
@@ -316,7 +328,15 @@ export function ExportPage() {
                     <motion.button
                       whileHover={{ scale: 1.1 }}
                       whileTap={{ scale: 0.95 }}
-                      onClick={() => setIsPlaying(!isPlaying)}
+                      onClick={() => {
+                        if (videoRef.current) {
+                          if (isPlaying) {
+                            videoRef.current.pause();
+                          } else {
+                            videoRef.current.play();
+                          }
+                        }
+                      }}
                       className="w-20 h-20 rounded-full bg-white/20 backdrop-blur-sm flex items-center justify-center hover:bg-white/30 transition-colors"
                     >
                       {isPlaying ? (
@@ -342,7 +362,16 @@ export function ExportPage() {
 
                 {/* Progress Bar */}
                 <div className="space-y-2">
-                  <div className="h-2 bg-white/10 rounded-full overflow-hidden">
+                  <div 
+                    className="h-2 bg-white/10 rounded-full overflow-hidden cursor-pointer"
+                    onClick={(e) => {
+                      if (videoRef.current) {
+                        const rect = e.currentTarget.getBoundingClientRect();
+                        const percent = (e.clientX - rect.left) / rect.width;
+                        videoRef.current.currentTime = percent * videoRef.current.duration;
+                      }
+                    }}
+                  >
                     <motion.div
                       className="h-full bg-gradient-to-r from-sm-magenta to-sm-pink"
                       style={{ width: `${playbackProgress}%` }}
@@ -350,7 +379,7 @@ export function ExportPage() {
                   </div>
                   <div className="flex justify-between text-sm text-white/60 font-mono">
                     <span>{formatTime(currentTime)}</span>
-                    <span>{currentVersionData.duration}</span>
+                    <span>{formatTime(videoRef.current?.duration || currentVideo?.duration_seconds || 6)}</span>
                   </div>
                 </div>
               </GlassCard>
@@ -372,63 +401,74 @@ export function ExportPage() {
                 </div>
 
                 <div className="space-y-3">
-                  {versionHistory.map((version) => (
-                    <motion.div
-                      key={version.id}
-                      whileHover={{ scale: 1.01 }}
-                      onClick={() => setSelectedVersion(version.id)}
-                      className={cn(
-                        "flex items-center gap-4 p-3 rounded-xl cursor-pointer transition-all",
-                        selectedVersion === version.id
-                          ? "bg-white/15 ring-2 ring-sm-magenta"
-                          : "bg-white/5 hover:bg-white/10"
-                      )}
-                    >
-                      {/* Thumbnail */}
-                      <div className="w-20 h-12 rounded-lg overflow-hidden flex-shrink-0">
-                        <img
-                          src={version.thumbnail}
-                          alt={version.name}
-                          className="w-full h-full object-cover"
-                        />
-                      </div>
-
-                      {/* Info */}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <p className="font-semibold text-white">
-                            {version.label}
-                          </p>
-                          <span className={cn(
-                            "px-2 py-0.5 rounded-full text-xs font-medium",
-                            version.status === "current" 
-                              ? "bg-sm-mint/20 text-sm-mint"
-                              : "bg-white/10 text-white/60"
-                          )}>
-                            {version.status === "current" ? "Current" : "Archived"}
-                          </span>
+                  {videos.length > 0 ? (
+                    videos.map((video, index) => (
+                      <motion.div
+                        key={video.id}
+                        whileHover={{ scale: 1.01 }}
+                        onClick={() => setSelectedVersion(video.id)}
+                        className={cn(
+                          "flex items-center gap-4 p-3 rounded-xl cursor-pointer transition-all",
+                          selectedVersion === video.id
+                            ? "bg-white/15 ring-2 ring-sm-magenta"
+                            : "bg-white/5 hover:bg-white/10"
+                        )}
+                      >
+                        {/* Thumbnail */}
+                        <div className="w-20 h-12 rounded-lg overflow-hidden flex-shrink-0 bg-white/5">
+                          {video.thumbnail_url ? (
+                            <img
+                              src={video.thumbnail_url}
+                              alt={video.version_label}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <video
+                              src={video.video_url}
+                              className="w-full h-full object-cover"
+                            />
+                          )}
                         </div>
-                        <div className="flex items-center gap-3 text-sm text-white/60 mt-1">
-                          <span className="flex items-center gap-1">
-                            <Clock className="w-3 h-3" />
-                            {version.duration}
-                          </span>
-                          <span className="flex items-center gap-1">
-                            <Film className="w-3 h-3" />
-                            {version.resolution}
-                          </span>
-                          <span className="text-white/40 hidden sm:inline">
-                            {version.timestamp}
-                          </span>
-                        </div>
-                      </div>
 
-                      {/* Select Indicator */}
-                      {selectedVersion === version.id && (
-                        <Check className="w-5 h-5 text-sm-magenta flex-shrink-0" />
-                      )}
-                    </motion.div>
-                  ))}
+                        {/* Info */}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <p className="font-semibold text-white">
+                              {video.version_label || `v${video.version_number}`}
+                            </p>
+                            {index === 0 && (
+                              <span className="px-2 py-0.5 rounded-full text-xs bg-sm-mint/20 text-sm-mint">
+                                Latest
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-3 text-sm text-white/60 mt-1">
+                            <span className="flex items-center gap-1">
+                              <Clock className="w-3 h-3" />
+                              {video.duration_seconds || 6}s
+                            </span>
+                            <span className="flex items-center gap-1">
+                              <Film className="w-3 h-3" />
+                              {video.resolution || '1080p'}
+                            </span>
+                            <span className="text-white/40 hidden sm:inline">
+                              {new Date(video.created_at).toLocaleDateString()}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Select Indicator */}
+                        {selectedVersion === video.id && (
+                          <Check className="w-5 h-5 text-sm-magenta flex-shrink-0" />
+                        )}
+                      </motion.div>
+                    ))
+                  ) : (
+                    <div className="text-center py-8 text-white/40">
+                      <p>No videos generated yet</p>
+                      <p className="text-sm mt-1">Generate a video from the canvas</p>
+                    </div>
+                  )}
                 </div>
               </GlassCard>
 

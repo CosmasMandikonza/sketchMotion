@@ -3,6 +3,12 @@ import { motion } from "framer-motion";
 import { FrameCard } from "./FrameCard";
 import { cn } from "@/lib/utils";
 
+interface RemoteSelection {
+  userId: string;
+  userName: string;
+  color: string;
+}
+
 interface Frame {
   id: string;
   position: { x: number; y: number };
@@ -11,6 +17,11 @@ interface Frame {
   isPolishing?: boolean;
   title?: string;
   thumbnailColor?: string;
+  durationMs?: number;
+  motionNotes?: string;
+  // Remote collaboration
+  isRemoteMoving?: boolean;
+  remoteSelection?: RemoteSelection | null;
 }
 
 interface Connection {
@@ -30,9 +41,13 @@ interface InfiniteCanvasProps {
   onFrameDoubleClick?: (id: string) => void;
   onConnectionDelete?: (id: string) => void;
   onFramePositionChange: (id: string, delta: { dx: number; dy: number }) => void;
+  onFramePolish?: (id: string) => void;
   activeTool: string;
   zoom: number;
   connectingFromFrameId?: string | null;
+  // New props
+  beatModeEnabled?: boolean;
+  onFrameDurationChange?: (id: string, durationMs: number) => void;
 }
 
 export function InfiniteCanvas({
@@ -46,9 +61,12 @@ export function InfiniteCanvas({
   onFrameDoubleClick,
   onConnectionDelete,
   onFramePositionChange,
+  onFramePolish,
   activeTool,
   zoom,
   connectingFromFrameId,
+  beatModeEnabled = false,
+  onFrameDurationChange,
 }: InfiniteCanvasProps) {
   const [hoveredConnection, setHoveredConnection] = useState<string | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -241,45 +259,38 @@ export function InfiniteCanvas({
         {/* Connection Lines */}
         <svg className="absolute inset-0 w-[5000px] h-[5000px]" style={{ pointerEvents: 'none' }}>
           <defs>
-            <linearGradient id="connectionGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#FF6B9D" />
-              <stop offset="100%" stopColor="#C471ED" />
-            </linearGradient>
-            <linearGradient id="connectionGradientHover" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#FF3D8F" />
-              <stop offset="100%" stopColor="#A78BFA" />
-            </linearGradient>
+            {/* Clean white arrowhead */}
             <marker
               id="arrowhead"
-              markerWidth="12"
-              markerHeight="9"
-              refX="10"
-              refY="4.5"
+              markerWidth="10"
+              markerHeight="8"
+              refX="9"
+              refY="4"
               orient="auto"
             >
-              <polygon points="0 0, 12 4.5, 0 9" fill="#C471ED" />
+              <path 
+                d="M 0 0 L 10 4 L 0 8 L 2 4 Z" 
+                fill="rgba(255, 255, 255, 0.8)"
+              />
             </marker>
             <marker
               id="arrowheadHover"
               markerWidth="12"
-              markerHeight="9"
+              markerHeight="10"
               refX="10"
-              refY="4.5"
+              refY="5"
               orient="auto"
             >
-              <polygon points="0 0, 12 4.5, 0 9" fill="#FF3D8F" />
+              <path 
+                d="M 0 0 L 12 5 L 0 10 L 2.5 5 Z" 
+                fill="rgba(255, 255, 255, 1)"
+              />
             </marker>
-            <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-              <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+            {/* Subtle glow for visibility */}
+            <filter id="connectionGlow" x="-20%" y="-20%" width="140%" height="140%">
+              <feGaussianBlur stdDeviation="2" result="blur"/>
               <feMerge>
-                <feMergeNode in="coloredBlur"/>
-                <feMergeNode in="SourceGraphic"/>
-              </feMerge>
-            </filter>
-            <filter id="glowStrong" x="-50%" y="-50%" width="200%" height="200%">
-              <feGaussianBlur stdDeviation="5" result="coloredBlur"/>
-              <feMerge>
-                <feMergeNode in="coloredBlur"/>
+                <feMergeNode in="blur"/>
                 <feMergeNode in="SourceGraphic"/>
               </feMerge>
             </filter>
@@ -303,7 +314,7 @@ export function InfiniteCanvas({
                 <path
                   d={path}
                   stroke="transparent"
-                  strokeWidth="20"
+                  strokeWidth="24"
                   fill="none"
                   style={{ pointerEvents: 'stroke', cursor: 'pointer' }}
                   onMouseEnter={() => setHoveredConnection(connection.id)}
@@ -313,21 +324,34 @@ export function InfiniteCanvas({
                     onConnectionDelete?.(connection.id);
                   }}
                 />
-                {/* Visible path */}
+                
+                {/* Background glow line (solid, subtle) */}
                 <path
                   d={path}
-                  stroke={isHovered ? "url(#connectionGradientHover)" : "url(#connectionGradient)"}
-                  strokeWidth={isHovered ? 4 : 3}
+                  stroke={isHovered ? "rgba(255, 255, 255, 0.3)" : "rgba(255, 255, 255, 0.15)"}
+                  strokeWidth={isHovered ? 6 : 4}
+                  fill="none"
+                  strokeLinecap="round"
+                  filter="url(#connectionGlow)"
+                  style={{ pointerEvents: 'none' }}
+                />
+                
+                {/* Main dashed line */}
+                <path
+                  d={path}
+                  stroke={isHovered ? "rgba(255, 255, 255, 0.95)" : "rgba(255, 255, 255, 0.7)"}
+                  strokeWidth={isHovered ? 3 : 2.5}
+                  strokeDasharray={isHovered ? "12 6" : "8 6"}
                   fill="none"
                   markerEnd={isHovered ? "url(#arrowheadHover)" : "url(#arrowhead)"}
-                  filter={isHovered ? "url(#glowStrong)" : "url(#glow)"}
                   strokeLinecap="round"
                   style={{
                     pointerEvents: 'none',
-                    transition: 'stroke 0.16s ease, stroke-width 0.16s ease, filter 0.16s ease',
+                    transition: 'stroke 0.15s ease, stroke-width 0.15s ease',
                   }}
                 />
-                {/* Sequence number badge */}
+                
+                {/* Sequence number badge - cleaner circle style */}
                 <g
                   transform={`translate(${labelX}, ${labelY})`}
                   style={{ pointerEvents: 'auto', cursor: 'pointer' }}
@@ -338,19 +362,14 @@ export function InfiniteCanvas({
                     onConnectionDelete?.(connection.id);
                   }}
                 >
-                  {/* Pill background */}
-                  <rect
-                    x={-14}
-                    y={-9}
-                    width={28}
-                    height={18}
-                    rx={999}
-                    ry={999}
-                    fill={isHovered ? "rgba(255,61,143,0.95)" : "rgba(15,23,42,0.90)"}
-                    stroke={isHovered ? "#FF9BD5" : "rgba(248,250,252,0.6)"}
-                    strokeWidth={1.5}
+                  {/* Circle background */}
+                  <circle
+                    r={12}
+                    fill={isHovered ? "rgba(255, 255, 255, 0.95)" : "rgba(30, 30, 40, 0.9)"}
+                    stroke={isHovered ? "rgba(255, 255, 255, 1)" : "rgba(255, 255, 255, 0.6)"}
+                    strokeWidth={2}
                     style={{
-                      transition: 'fill 0.16s ease, stroke 0.16s ease',
+                      transition: 'fill 0.15s ease, stroke 0.15s ease',
                     }}
                   />
                   {/* Number */}
@@ -359,9 +378,9 @@ export function InfiniteCanvas({
                     y={0}
                     textAnchor="middle"
                     dominantBaseline="central"
-                    fill="white"
-                    fontSize="10"
-                    fontWeight="600"
+                    fill={isHovered ? "#1a1a2e" : "white"}
+                    fontSize="11"
+                    fontWeight="700"
                     fontFamily="system-ui, -apple-system, sans-serif"
                     style={{ pointerEvents: 'none' }}
                   >
@@ -390,11 +409,19 @@ export function InfiniteCanvas({
             onDoubleClick={() => onFrameDoubleClick?.(frame.id)}
             onDelete={() => onFrameDelete(frame.id)}
             onDuplicate={() => onFrameDuplicate(frame.id)}
+            onPolish={() => onFramePolish?.(frame.id)}
             position={frame.position}
             zoom={zoom}
             onPositionChange={(delta) =>
               onFramePositionChange(frame.id, delta)
             }
+            beatModeEnabled={beatModeEnabled}
+            durationMs={frame.durationMs}
+            onDurationChange={(newDuration) => onFrameDurationChange?.(frame.id, newDuration)}
+            motionNotes={frame.motionNotes}
+            // Remote collaboration
+            isRemoteMoving={frame.isRemoteMoving}
+            remoteSelection={frame.remoteSelection}
           />
         ))}
       </motion.div>

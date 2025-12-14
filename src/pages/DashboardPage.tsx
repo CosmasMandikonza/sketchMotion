@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { motion, AnimatePresence } from "framer-motion";
+import { useAuth } from "@/hooks/useAuth";
+import { supabase } from "@/lib/supabase";
 import {
   Sparkles,
   Plus,
@@ -21,12 +23,13 @@ import {
   FolderOpen,
   Settings,
   LogOut,
-  Bell,
   ChevronDown,
   Film,
   Users,
   ArchiveRestore,
   ExternalLink,
+  User,
+  X,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -159,100 +162,308 @@ const recentActivity = [
   { action: "Added collaborator", board: "App Onboarding Flow", time: "2 days ago" },
 ];
 
-// Custom hook for board management with localStorage
+// Custom hook for board management with Supabase
 function useBoards() {
+  const { user } = useAuth();
   const [boards, setBoards] = useState<Board[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Load boards from localStorage on mount
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      const stored = localStorage.getItem(BOARDS_STORAGE_KEY);
-      if (stored) {
-        try {
-          const parsed = JSON.parse(stored);
-          // Convert date strings back to Date objects
-          const boardsWithDates = parsed.map((b: Board & { updatedAt: string }) => ({
-            ...b,
-            updatedAt: new Date(b.updatedAt),
-          }));
-          setBoards(boardsWithDates);
-        } catch {
-          setBoards(initialBoards);
-        }
-      } else {
-        setBoards(initialBoards);
-      }
+  // Fetch boards from Supabase with sharing and collaborator info
+  const fetchBoards = useCallback(async () => {
+    if (!user) {
+      setBoards([]);
       setIsLoading(false);
-    }, 500); // Simulate loading
-
-    return () => clearTimeout(timer);
-  }, []);
-
-  // Save to localStorage whenever boards change
-  useEffect(() => {
-    if (!isLoading && boards.length > 0) {
-      localStorage.setItem(BOARDS_STORAGE_KEY, JSON.stringify(boards));
+      return;
     }
-  }, [boards, isLoading]);
 
-  const createBoard = useCallback(() => {
-    const newId = `board-${Date.now()}`;
-    const boardCount = boards.filter(b => b.title.startsWith("Untitled Board")).length;
-    const newBoard: Board = {
-      id: newId,
-      title: `Untitled Board ${boardCount + 1}`,
-      thumbnailUrl: "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=400&q=80",
-      frameCount: 0,
-      updatedAt: new Date(),
-      isShared: false,
-      isArchived: false,
-      collaborators: 1,
-    };
-    setBoards(prev => [newBoard, ...prev]);
-    return newId;
-  }, [boards]);
+    try {
+      // Fetch user's own boards with frames
+      const { data: ownBoards, error: ownError } = await supabase
+        .from('boards')
+        .select(`
+          id,
+          name,
+          updated_at,
+          is_archived,
+          sharing_settings,
+          frames (
+            id,
+            sketch_url,
+            polished_url
+          ),
+          board_collaborators (
+            id,
+            user_id,
+            email
+          )
+        `)
+        .eq('user_id', user.id)
+        .order('updated_at', { ascending: false });
 
-  const duplicateBoard = useCallback((boardId: string) => {
+      if (ownError) throw ownError;
+
+      // Fetch boards shared with user
+      const { data: sharedCollabs, error: sharedError } = await supabase
+        .from('board_collaborators')
+        .select(`
+          board_id,
+          boards!inner (
+            id,
+            name,
+            updated_at,
+            is_archived,
+            sharing_settings,
+            user_id,
+            frames (
+              id,
+              sketch_url,
+              polished_url
+            ),
+            board_collaborators (
+              id,
+              user_id,
+              email
+            )
+          )
+        `)
+        .or(`user_id.eq.${user.id},email.eq.${user.email}`);
+
+      if (sharedError) throw sharedError;
+
+      // Process own boards
+      const ownBoardsData: Board[] = (ownBoards || []).map(board => {
+        const sharingSettings = board.sharing_settings as { public_access?: string; allow_copy?: boolean } | null;
+        const isPubliclyShared = sharingSettings?.public_access && sharingSettings.public_access !== 'none';
+        const hasCollaborators = (board.board_collaborators?.length || 0) > 0;
+
+        return {
+          id: board.id,
+          title: board.name,
+          thumbnailUrl: board.frames?.[0]?.polished_url || board.frames?.[0]?.sketch_url || "",
+          frameCount: board.frames?.length || 0,
+          updatedAt: new Date(board.updated_at),
+          isShared: isPubliclyShared || hasCollaborators,
+          isArchived: board.is_archived || false,
+          collaborators: (board.board_collaborators?.length || 0) + 1, // +1 for owner
+        };
+      });
+
+      // Process shared boards (exclude duplicates if user owns them)
+      const ownBoardIds = new Set(ownBoardsData.map(b => b.id));
+      const sharedBoardsData: Board[] = (sharedCollabs || [])
+        .filter(collab => {
+          const board = collab.boards as any;
+          return board && !ownBoardIds.has(board.id);
+        })
+        .map(collab => {
+          const board = collab.boards as any;
+          return {
+            id: board.id,
+            title: board.name,
+            thumbnailUrl: board.frames?.[0]?.polished_url || board.frames?.[0]?.sketch_url || "",
+            frameCount: board.frames?.length || 0,
+            updatedAt: new Date(board.updated_at),
+            isShared: true, // It's shared with this user
+            isArchived: board.is_archived || false,
+            collaborators: (board.board_collaborators?.length || 0) + 1,
+          };
+        });
+
+      // Combine and sort by updated_at
+      const allBoards = [...ownBoardsData, ...sharedBoardsData].sort(
+        (a, b) => b.updatedAt.getTime() - a.updatedAt.getTime()
+      );
+
+      setBoards(allBoards);
+    } catch (error) {
+      console.error('Error fetching boards:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [user]);
+
+  useEffect(() => {
+    fetchBoards();
+  }, [fetchBoards]);
+
+  const createBoard = useCallback(async () => {
+    if (!user) return null;
+
+    try {
+      // Find max number from existing "Untitled Board X" titles
+      const existingNumbers = boards
+        .map(b => {
+          const match = b.title.match(/^Untitled Board (\d+)/);
+          return match ? parseInt(match[1], 10) : 0;
+        });
+      const maxNumber = Math.max(0, ...existingNumbers);
+
+      const { data, error } = await supabase
+        .from('boards')
+        .insert({
+          user_id: user.id,
+          name: `Untitled Board ${maxNumber + 1}`,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      const newBoard: Board = {
+        id: data.id,
+        title: data.name,
+        thumbnailUrl: "",
+        frameCount: 0,
+        updatedAt: new Date(data.updated_at),
+        isShared: false,
+        isArchived: false,
+        collaborators: 1,
+      };
+
+      setBoards(prev => [newBoard, ...prev]);
+      return data.id;
+    } catch (error) {
+      console.error('Error creating board:', error);
+      return null;
+    }
+  }, [user, boards]);
+
+  const duplicateBoard = useCallback(async (boardId: string) => {
+    if (!user) return;
+
     const board = boards.find(b => b.id === boardId);
     if (!board) return;
-    
-    const newId = `board-${Date.now()}`;
-    const duplicated: Board = {
-      ...board,
-      id: newId,
-      title: `${board.title} (Copy)`,
-      updatedAt: new Date(),
-      isShared: false,
-    };
-    setBoards(prev => [duplicated, ...prev]);
-  }, [boards]);
 
-  const archiveBoard = useCallback((boardId: string) => {
-    setBoards(prev => prev.map(b => 
-      b.id === boardId ? { ...b, isArchived: !b.isArchived, updatedAt: new Date() } : b
-    ));
+    try {
+      // Create new board
+      const { data: newBoardData, error: boardError } = await supabase
+        .from('boards')
+        .insert({
+          user_id: user.id,
+          name: `${board.title} (Copy)`,
+        })
+        .select()
+        .single();
+
+      if (boardError) throw boardError;
+
+      // Fetch original board's frames
+      const { data: frames, error: framesError } = await supabase
+        .from('frames')
+        .select('*')
+        .eq('board_id', boardId);
+
+      if (framesError) throw framesError;
+
+      // Duplicate frames to new board
+      if (frames && frames.length > 0) {
+        const newFrames = frames.map(frame => ({
+          board_id: newBoardData.id,
+          title: frame.title,
+          position_x: frame.position_x,
+          position_y: frame.position_y,
+          status: frame.status,
+          sketch_url: frame.sketch_url,
+          polished_url: frame.polished_url,
+          animation_style: frame.animation_style,
+          duration_ms: frame.duration_ms,
+          sort_order: frame.sort_order,
+        }));
+
+        await supabase.from('frames').insert(newFrames);
+      }
+
+      await fetchBoards();
+    } catch (error) {
+      console.error('Error duplicating board:', error);
+    }
+  }, [user, boards, fetchBoards]);
+
+  const archiveBoard = useCallback(async (boardId: string) => {
+    if (!user) return;
+
+    const board = boards.find(b => b.id === boardId);
+    if (!board) return;
+
+    try {
+      const newArchivedState = !board.isArchived;
+
+      const { error } = await supabase
+        .from('boards')
+        .update({ is_archived: newArchivedState })
+        .eq('id', boardId);
+
+      if (error) throw error;
+
+      // Update local state
+      setBoards(prev => prev.map(b =>
+        b.id === boardId ? { ...b, isArchived: newArchivedState } : b
+      ));
+    } catch (error) {
+      console.error('Error archiving board:', error);
+    }
+  }, [user, boards]);
+
+  const deleteBoard = useCallback(async (boardId: string) => {
+    try {
+      const { error } = await supabase
+        .from('boards')
+        .delete()
+        .eq('id', boardId);
+
+      if (error) throw error;
+
+      setBoards(prev => prev.filter(b => b.id !== boardId));
+    } catch (error) {
+      console.error('Error deleting board:', error);
+    }
   }, []);
 
-  const deleteBoard = useCallback((boardId: string) => {
-    setBoards(prev => prev.filter(b => b.id !== boardId));
-  }, []);
-
-  return { boards, isLoading, createBoard, duplicateBoard, archiveBoard, deleteBoard };
+  return { boards, isLoading, createBoard, duplicateBoard, archiveBoard, deleteBoard, refetch: fetchBoards };
 }
 
 export function DashboardPage() {
   const navigate = useNavigate();
+  const { user, signOut } = useAuth();
   const { boards, isLoading, createBoard, duplicateBoard, archiveBoard, deleteBoard } = useBoards();
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [searchQuery, setSearchQuery] = useState("");
   const [activeFilter, setActiveFilter] = useState<FilterType>("all");
 
+  // Modal states
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+
+  // Settings state (stored in localStorage)
+  const [settings, setSettings] = useState(() => {
+    const saved = localStorage.getItem('sketchmotion_settings');
+    return saved ? JSON.parse(saved) : {
+      theme: 'dark',
+      autoSave: true,
+      showTips: true,
+      defaultDuration: 2000,
+    };
+  });
+
+  // Save settings to localStorage when changed
+  const updateSettings = useCallback((newSettings: typeof settings) => {
+    setSettings(newSettings);
+    localStorage.setItem('sketchmotion_settings', JSON.stringify(newSettings));
+  }, []);
+
   // Handle creating a new board
-  const handleCreateBoard = useCallback(() => {
-    const newId = createBoard();
-    navigate(`/canvas/${newId}`);
+  const handleCreateBoard = useCallback(async () => {
+    const newId = await createBoard();
+    if (newId) {
+      navigate(`/canvas/${newId}`);
+    }
   }, [createBoard, navigate]);
+
+  // Handle sign out
+  const handleSignOut = useCallback(async () => {
+    await signOut();
+    navigate('/auth');
+  }, [signOut, navigate]);
 
   // Filter boards based on active filter and search
   const filteredBoards = useMemo(() => {
@@ -388,11 +599,17 @@ export function DashboardPage() {
 
             {/* Bottom Actions */}
             <div className="space-y-1 pt-4 border-t border-white/10">
-              <button className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-white/70 hover:bg-white/5 hover:text-white transition-colors">
+              <button
+                onClick={() => setShowSettingsModal(true)}
+                className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-white/70 hover:bg-white/5 hover:text-white transition-colors"
+              >
                 <Settings className="w-5 h-5" />
                 Settings
               </button>
-              <button className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-white/70 hover:bg-white/5 hover:text-white transition-colors">
+              <button
+                onClick={handleSignOut}
+                className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-white/70 hover:bg-white/5 hover:text-white transition-colors"
+              >
                 <LogOut className="w-5 h-5" />
                 Log Out
               </button>
@@ -414,30 +631,36 @@ export function DashboardPage() {
               </div>
 
               <div className="flex items-center gap-4">
-                {/* Notifications */}
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <button className="relative p-2 rounded-lg bg-white/10 hover:bg-white/20 transition-colors">
-                      <Bell className="w-5 h-5 text-white" />
-                      <span className="absolute top-1 right-1 w-2 h-2 bg-sm-magenta rounded-full" />
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent>Notifications</TooltipContent>
-                </Tooltip>
-
                 {/* User Menu */}
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <button className="flex items-center gap-2 p-2 rounded-lg bg-white/10 hover:bg-white/20 transition-colors">
-                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-sm-pink to-sm-purple" />
+                      <div className="w-8 h-8 rounded-full bg-gradient-to-br from-sm-pink to-sm-purple flex items-center justify-center">
+                        {user?.email ? (
+                          <span className="text-white text-xs font-medium">
+                            {user.email.charAt(0).toUpperCase()}
+                          </span>
+                        ) : (
+                          <User className="w-4 h-4 text-white" />
+                        )}
+                      </div>
                       <ChevronDown className="w-4 h-4 text-white" />
                     </button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-48">
-                    <DropdownMenuItem>Profile</DropdownMenuItem>
-                    <DropdownMenuItem>Settings</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => setShowProfileModal(true)}>
+                      <User className="w-4 h-4 mr-2" />
+                      Profile
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => setShowSettingsModal(true)}>
+                      <Settings className="w-4 h-4 mr-2" />
+                      Settings
+                    </DropdownMenuItem>
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem>Log Out</DropdownMenuItem>
+                    <DropdownMenuItem onClick={handleSignOut}>
+                      <LogOut className="w-4 h-4 mr-2" />
+                      Log Out
+                    </DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
               </div>
@@ -884,6 +1107,241 @@ export function DashboardPage() {
             )}
           </div>
         </div>
+
+        {/* Profile Modal */}
+        <AnimatePresence>
+          {showProfileModal && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+              onClick={() => setShowProfileModal(false)}
+            >
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <GlassCard className="w-full max-w-md p-6">
+                  <div className="flex items-center justify-between mb-6">
+                    <h2 className="font-display font-bold text-xl text-white">Profile</h2>
+                    <button
+                      onClick={() => setShowProfileModal(false)}
+                      className="p-2 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                  {/* Profile Avatar */}
+                  <div className="flex flex-col items-center mb-6">
+                    <div className="w-20 h-20 rounded-full bg-gradient-to-br from-sm-pink to-sm-purple flex items-center justify-center mb-4">
+                      <span className="text-white text-2xl font-bold">
+                        {user?.email?.charAt(0).toUpperCase() || '?'}
+                      </span>
+                    </div>
+                    <h3 className="text-white font-semibold text-lg">
+                      {user?.user_metadata?.full_name || user?.email?.split('@')[0] || 'User'}
+                    </h3>
+                    <p className="text-white/60 text-sm">{user?.email || 'No email'}</p>
+                  </div>
+
+                  {/* Profile Info */}
+                  <div className="space-y-4">
+                    <div className="p-4 rounded-lg bg-white/5">
+                      <label className="text-white/50 text-xs uppercase tracking-wider">Email</label>
+                      <p className="text-white mt-1">{user?.email || 'Not set'}</p>
+                    </div>
+                    <div className="p-4 rounded-lg bg-white/5">
+                      <label className="text-white/50 text-xs uppercase tracking-wider">Member Since</label>
+                      <p className="text-white mt-1">
+                        {user?.created_at
+                          ? new Date(user.created_at).toLocaleDateString('en-US', {
+                              year: 'numeric',
+                              month: 'long',
+                              day: 'numeric',
+                            })
+                          : 'Unknown'}
+                      </p>
+                    </div>
+                    <div className="p-4 rounded-lg bg-white/5">
+                      <label className="text-white/50 text-xs uppercase tracking-wider">Boards Created</label>
+                      <p className="text-white mt-1">{boards.length}</p>
+                    </div>
+                    <div className="p-4 rounded-lg bg-white/5">
+                      <label className="text-white/50 text-xs uppercase tracking-wider">Auth Provider</label>
+                      <p className="text-white mt-1 capitalize">
+                        {user?.app_metadata?.provider || 'Email'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <Button
+                    onClick={() => setShowProfileModal(false)}
+                    className="w-full mt-6 bg-sm-magenta hover:bg-sm-magenta/90 text-white font-semibold"
+                  >
+                    Close
+                  </Button>
+                </GlassCard>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Settings Modal */}
+        <AnimatePresence>
+          {showSettingsModal && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+              onClick={() => setShowSettingsModal(false)}
+            >
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <GlassCard className="w-full max-w-md p-6">
+                  <div className="flex items-center justify-between mb-6">
+                    <h2 className="font-display font-bold text-xl text-white">Settings</h2>
+                    <button
+                      onClick={() => setShowSettingsModal(false)}
+                      className="p-2 rounded-lg text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                  <div className="space-y-6">
+                    {/* Auto-save setting */}
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h3 className="text-white font-medium">Auto-save</h3>
+                        <p className="text-white/50 text-sm">Automatically save changes</p>
+                      </div>
+                      <button
+                        onClick={() => updateSettings({ ...settings, autoSave: !settings.autoSave })}
+                        className={`w-12 h-6 rounded-full transition-colors ${
+                          settings.autoSave ? 'bg-sm-magenta' : 'bg-white/20'
+                        }`}
+                      >
+                        <div
+                          className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                            settings.autoSave ? 'translate-x-6' : 'translate-x-0.5'
+                          }`}
+                        />
+                      </button>
+                    </div>
+
+                    {/* Show tips setting */}
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h3 className="text-white font-medium">Show Tips</h3>
+                        <p className="text-white/50 text-sm">Display helpful tips and hints</p>
+                      </div>
+                      <button
+                        onClick={() => updateSettings({ ...settings, showTips: !settings.showTips })}
+                        className={`w-12 h-6 rounded-full transition-colors ${
+                          settings.showTips ? 'bg-sm-magenta' : 'bg-white/20'
+                        }`}
+                      >
+                        <div
+                          className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                            settings.showTips ? 'translate-x-6' : 'translate-x-0.5'
+                          }`}
+                        />
+                      </button>
+                    </div>
+
+                    {/* Default duration */}
+                    <div>
+                      <div className="flex items-center justify-between mb-2">
+                        <div>
+                          <h3 className="text-white font-medium">Default Frame Duration</h3>
+                          <p className="text-white/50 text-sm">Duration for new frames</p>
+                        </div>
+                        <span className="text-white font-medium">{settings.defaultDuration / 1000}s</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="500"
+                        max="5000"
+                        step="500"
+                        value={settings.defaultDuration}
+                        onChange={(e) => updateSettings({ ...settings, defaultDuration: parseInt(e.target.value) })}
+                        className="w-full h-2 bg-white/20 rounded-lg appearance-none cursor-pointer accent-sm-magenta"
+                      />
+                      <div className="flex justify-between text-xs text-white/40 mt-1">
+                        <span>0.5s</span>
+                        <span>5s</span>
+                      </div>
+                    </div>
+
+                    {/* Theme setting */}
+                    <div>
+                      <h3 className="text-white font-medium mb-2">Theme</h3>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => updateSettings({ ...settings, theme: 'dark' })}
+                          className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors ${
+                            settings.theme === 'dark'
+                              ? 'bg-sm-magenta text-white'
+                              : 'bg-white/10 text-white/70 hover:bg-white/20'
+                          }`}
+                        >
+                          Dark
+                        </button>
+                        <button
+                          onClick={() => updateSettings({ ...settings, theme: 'light' })}
+                          className={`flex-1 py-2 px-4 rounded-lg font-medium transition-colors ${
+                            settings.theme === 'light'
+                              ? 'bg-sm-magenta text-white'
+                              : 'bg-white/10 text-white/70 hover:bg-white/20'
+                          }`}
+                          disabled
+                          title="Light theme coming soon"
+                        >
+                          Light
+                          <span className="text-xs ml-1">(Soon)</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Clear onboarding data */}
+                    <div className="pt-4 border-t border-white/10">
+                      <button
+                        onClick={() => {
+                          // Clear all onboarding localStorage entries
+                          Object.keys(localStorage).forEach(key => {
+                            if (key.startsWith('onboarding_dismissed_')) {
+                              localStorage.removeItem(key);
+                            }
+                          });
+                          alert('Onboarding tutorials have been reset. They will show again when you open a board.');
+                        }}
+                        className="w-full py-2 px-4 rounded-lg bg-white/10 text-white/70 hover:bg-white/20 hover:text-white transition-colors text-sm"
+                      >
+                        Reset Onboarding Tutorials
+                      </button>
+                    </div>
+                  </div>
+
+                  <Button
+                    onClick={() => setShowSettingsModal(false)}
+                    className="w-full mt-6 bg-sm-magenta hover:bg-sm-magenta/90 text-white font-semibold"
+                  >
+                    Done
+                  </Button>
+                </GlassCard>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </GradientBackground>
     </TooltipProvider>
   );

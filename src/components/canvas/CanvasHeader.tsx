@@ -2,22 +2,25 @@ import { useState } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Check, Cloud, Pencil } from "lucide-react";
+import { usePresence } from "@/hooks/usePresence";
+import { CollaboratorAvatars } from "./CollaboratorAvatars";
 
 interface CanvasHeaderProps {
   boardName: string;
   onBoardNameChange: (name: string) => void;
-  collaborators: number;
+  boardId?: string;
   isSaving: boolean;
 }
 
 export function CanvasHeader({
   boardName,
   onBoardNameChange,
-  collaborators,
+  boardId,
   isSaving,
 }: CanvasHeaderProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [tempName, setTempName] = useState(boardName);
+  const { isConnected } = usePresence(boardId || null);
 
   const handleSave = () => {
     onBoardNameChange(tempName);
@@ -82,21 +85,27 @@ export function CanvasHeader({
         )}
       </div>
 
-      {/* Collaborators indicator */}
-      {collaborators > 1 && (
-        <div className="flex -space-x-2 ml-2">
-          {Array.from({ length: Math.min(collaborators, 3) }).map((_, i) => (
-            <div
-              key={i}
-              className="w-6 h-6 rounded-full border-2 border-white/20 bg-gradient-to-br from-sm-pink to-sm-purple"
-            />
-          ))}
-          {collaborators > 3 && (
-            <div className="w-6 h-6 rounded-full border-2 border-white/20 bg-white/20 flex items-center justify-center text-xs text-white">
-              +{collaborators - 3}
-            </div>
-          )}
-        </div>
+      {/* Connection indicator */}
+      {boardId && (
+        isConnected ? (
+          <div className="flex items-center gap-1.5">
+            <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]" />
+            <span className="text-xs text-emerald-400 font-medium">Live</span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5">
+            <div className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+            <span className="text-xs text-amber-400 font-medium">Connecting...</span>
+          </div>
+        )
+      )}
+
+      {/* Collaborators & Share */}
+      {boardId && (
+        <CollaboratorAvatars
+          boardId={boardId}
+          maxVisible={3}
+        />
       )}
     </div>
   );

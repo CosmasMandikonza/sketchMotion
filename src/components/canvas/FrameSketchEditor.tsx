@@ -2,9 +2,11 @@ import { useRef, useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { GlassCard } from "@/components/layout/GlassCard";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import {
   X,
   Undo2,
+  Redo2,
   Trash2,
   Check,
   Pencil,
@@ -12,10 +14,14 @@ import {
   Square,
   Circle,
   ArrowRight,
+  ArrowLeft,
   Eraser,
   Type,
   ImageIcon,
   Upload,
+  Wand2,
+  Loader2,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -24,16 +30,73 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { polishSketch, polishSketchWithStyle } from "@/lib/googleAI";
+
+type AnimationStyle = "static" | "zoom-in" | "zoom-out" | "pan-left" | "pan-right" | "parallax";
+
+// Polish style options - shown BEFORE polishing
+type PolishStyle = "illustration" | "anime" | "realistic" | "watercolor" | "3d-render" | "comic";
+
+interface PolishStyleOption {
+  id: PolishStyle;
+  label: string;
+  description: string;
+  prompt: string;
+}
+
+const POLISH_STYLES: PolishStyleOption[] = [
+  {
+    id: "illustration",
+    label: "Digital Illustration",
+    description: "Clean, professional storyboard style",
+    prompt: "polished digital illustration, clean lines, professional storyboard frame, vibrant colors"
+  },
+  {
+    id: "anime",
+    label: "Anime",
+    description: "Japanese animation style",
+    prompt: "anime style, cel shading, vibrant colors, detailed anime illustration"
+  },
+  {
+    id: "realistic",
+    label: "Realistic",
+    description: "Photorealistic rendering",
+    prompt: "photorealistic, cinematic lighting, detailed textures, high quality render"
+  },
+  {
+    id: "watercolor",
+    label: "Watercolor",
+    description: "Soft, artistic watercolor painting",
+    prompt: "watercolor painting, soft edges, artistic, flowing colors, paper texture"
+  },
+  {
+    id: "3d-render",
+    label: "3D Render",
+    description: "Modern 3D visualization",
+    prompt: "3D render, Pixar style, smooth surfaces, global illumination, professional 3D"
+  },
+  {
+    id: "comic",
+    label: "Comic Book",
+    description: "Bold comic book art style",
+    prompt: "comic book style, bold outlines, dynamic shading, halftone dots, graphic novel art"
+  }
+];
+
+// Editor stage type
+type EditorStage = "drawing" | "style-select" | "polishing" | "preview";
 
 interface FrameSketchEditorProps {
   frame: {
     id: string;
     title: string;
     sketchDataUrl?: string;
+    motionNotes?: string;
+    animationStyle?: AnimationStyle;
   } | null;
   open: boolean;
   onClose: () => void;
-  onSave: (dataUrl: string) => void;
+  onSave: (dataUrl: string, shouldPolish?: boolean, motionNotes?: string, animationStyle?: AnimationStyle, originalSketchData?: string) => void;
 }
 
 // Expanded color palette
@@ -91,6 +154,14 @@ export function FrameSketchEditor({
     selectedToolRef.current = selectedTool;
   }, [selectedTool]);
 
+  // Sync motion notes when frame changes
+  useEffect(() => {
+    if (frame) {
+      setMotionNotes(frame.motionNotes || "");
+      setAnimationStyle(frame.animationStyle || "static");
+    }
+  }, [frame]);
+
   // Text tool state
   const [textInput, setTextInput] = useState("");
   const [textPosition, setTextPosition] = useState<{ x: number; y: number } | null>(null);
@@ -98,6 +169,24 @@ export function FrameSketchEditor({
 
   // Save confirmation state
   const [showSaveConfirmation, setShowSaveConfirmation] = useState(false);
+
+  // Motion notes state
+  const [motionNotes, setMotionNotes] = useState(frame?.motionNotes || "");
+  const [animationStyle, setAnimationStyle] = useState<AnimationStyle>(frame?.animationStyle || "static");
+  const [duration, setDuration] = useState(2);
+
+  // Stage management (4-stage flow: drawing → style-select → polishing → preview)
+  const [stage, setStage] = useState<EditorStage>("drawing");
+
+  // Polish configuration
+  const [selectedStyle, setSelectedStyle] = useState<PolishStyle>("illustration");
+
+  // Image states - CRITICAL: preserve original
+  const [originalSketchData, setOriginalSketchData] = useState<string | null>(null);
+  const [polishedImageData, setPolishedImageData] = useState<string | null>(null);
+
+  // Error state
+  const [polishError, setPolishError] = useState<string | null>(null);
 
   // Shape drawing state
   const startPosRef = useRef<{ x: number; y: number } | null>(null);
@@ -152,23 +241,20 @@ export function FrameSketchEditor({
 
       // Get device pixel ratio for crisp rendering on retina displays
       const dpr = window.devicePixelRatio || 1;
-      
+
       // Display size (what we work with in coordinates)
       const displayWidth = 640;
       const displayHeight = 360;
-      
+
       // Actual canvas size (scaled for retina)
       canvas.width = displayWidth * dpr;
       canvas.height = displayHeight * dpr;
       previewCanvas.width = displayWidth * dpr;
       previewCanvas.height = displayHeight * dpr;
-      
-      // Scale context so we can use display coordinates
+
+      // Reset transform and scale context (setting canvas.width resets transform)
       ctx.scale(dpr, dpr);
       previewCtx.scale(dpr, dpr);
-
-      // Draw grid background
-      drawGrid(ctx, displayWidth, displayHeight);
 
       // Clear preview canvas
       previewCtx.clearRect(0, 0, displayWidth, displayHeight);
@@ -177,18 +263,32 @@ export function FrameSketchEditor({
       setHistory([]);
       historyIndexRef.current = -1;
 
-      // If frame has existing sketch, draw it
+      // Always draw the grid background first (provides visual feedback while image loads)
+      drawGrid(ctx, displayWidth, displayHeight);
+
+      // If frame has existing sketch, load and draw it on top of the grid
+      // Always load the SKETCH (original drawing), never the polished image
       if (frame?.sketchDataUrl) {
+        console.log('[SketchEditor] Loading sketch from:', frame.sketchDataUrl?.substring(0, 80));
         const img = new Image();
+        img.crossOrigin = 'anonymous'; // Required for Supabase Storage URLs
         img.onload = () => {
+          // Draw the loaded sketch image on top of the grid background
           ctx.drawImage(img, 0, 0, displayWidth, displayHeight);
-          // Save initial state to history
+          // Save initial state to history (with the loaded image)
+          saveToHistory();
+          console.log('[SketchEditor] Successfully loaded sketch image');
+        };
+        img.onerror = (e) => {
+          console.error('[SketchEditor] Failed to load sketch image:', frame.sketchDataUrl, e);
+          // Grid is already drawn, just save to history
           saveToHistory();
         };
         img.src = frame.sketchDataUrl;
       } else {
-        // Save initial state to history
+        // No sketch exists - grid is already drawn, save to history
         saveToHistory();
+        console.log('[SketchEditor] No sketch URL, showing empty canvas with grid');
       }
     }
   }, [open, frame?.sketchDataUrl, drawGrid, saveToHistory]);
@@ -514,6 +614,7 @@ export function FrameSketchEditor({
   );
 
   // Undo
+  // Undo
   const handleUndo = useCallback(() => {
     if (historyIndexRef.current <= 0) return;
 
@@ -534,6 +635,27 @@ export function FrameSketchEditor({
     img.src = prevState;
   }, [history]);
 
+  // Redo
+  const handleRedo = useCallback(() => {
+    if (historyIndexRef.current >= history.length - 1) return;
+
+    historyIndexRef.current++;
+    const nextState = history[historyIndexRef.current];
+    if (!nextState) return;
+
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!ctx || !canvas) return;
+
+    const img = new Image();
+    img.onload = () => {
+      // Clear using display size
+      ctx.clearRect(0, 0, 640, 360);
+      ctx.drawImage(img, 0, 0, 640, 360);
+    };
+    img.src = nextState;
+  }, [history]);
+
   // Clear canvas
   const clearCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -545,21 +667,186 @@ export function FrameSketchEditor({
     saveToHistory();
   }, [drawGrid, saveToHistory]);
 
-  // Save
+  // Save draft (without polish)
   const handleSave = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
     // Show save confirmation
     setShowSaveConfirmation(true);
-    
+
     setTimeout(() => {
       const dataUrl = canvas.toDataURL("image/png");
-      onSave(dataUrl);
+      onSave(dataUrl, false, motionNotes, animationStyle);
       setShowSaveConfirmation(false);
       onClose();
     }, 400);
-  }, [onSave, onClose]);
+  }, [onSave, onClose, motionNotes, animationStyle]);
+
+  // Canvas validation - check if canvas is empty
+  const isCanvasEmpty = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return true;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return true;
+
+    // Sample pixels to check if anything was drawn
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const pixels = imageData.data;
+
+    // Count non-background pixels (not the dark blue grid background)
+    let drawnPixels = 0;
+    for (let i = 0; i < pixels.length; i += 4) {
+      const r = pixels[i];
+      const g = pixels[i + 1];
+      const b = pixels[i + 2];
+      // Skip if it's the background color (#1a1a2e) or grid dots
+      if (!(r === 26 && g === 26 && b === 46) && !(r < 30 && g < 30 && b < 50)) {
+        drawnPixels++;
+      }
+    }
+
+    // If less than 0.5% of canvas has drawing, consider it empty
+    const totalPixels = canvas.width * canvas.height;
+    return (drawnPixels / totalPixels) < 0.005;
+  }, []);
+
+  // Start Polish Flow - Capture Canvas FIRST
+  const handleStartPolish = useCallback(() => {
+    // Validate canvas has content
+    if (isCanvasEmpty()) {
+      setPolishError("Draw something first! Your canvas is empty.");
+      return;
+    }
+
+    // Capture current canvas state BEFORE changing anything
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const sketchData = canvas.toDataURL("image/png");
+    setOriginalSketchData(sketchData);
+    setPolishError(null);
+
+    // Go to style selection
+    setStage("style-select");
+  }, [isCanvasEmpty]);
+
+  // Execute Polish with Selected Style
+  const handleExecutePolish = useCallback(async () => {
+    if (!originalSketchData) return;
+
+    setStage("polishing");
+
+    const styleConfig = POLISH_STYLES.find(s => s.id === selectedStyle);
+
+    try {
+      const result = await polishSketchWithStyle(originalSketchData, styleConfig?.prompt || "");
+
+      if (result) {
+        setPolishedImageData(result);
+        setStage("preview");
+      } else {
+        setPolishError("AI couldn't generate an image. Try a different style or add more detail to your sketch.");
+        setStage("drawing");
+      }
+    } catch (error) {
+      console.error("Polish error:", error);
+      setPolishError(error instanceof Error ? error.message : "Failed to polish. Please try again.");
+      setStage("drawing");
+    }
+  }, [originalSketchData, selectedStyle]);
+
+  // Back to Drawing - RESTORE Canvas from saved data
+  const handleBackToDrawing = useCallback(() => {
+    setStage("drawing");
+    
+    // Restore canvas from originalSketchData after React re-renders
+    // Use requestAnimationFrame + setTimeout to ensure canvas is fully mounted and sized
+    setTimeout(() => {
+      requestAnimationFrame(() => {
+        if (originalSketchData && canvasRef.current) {
+          const canvas = canvasRef.current;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) return;
+          
+          const dpr = window.devicePixelRatio || 1;
+          const displayWidth = 640;
+          const displayHeight = 360;
+          
+          // Ensure canvas dimensions are correct (may have been reset on remount)
+          if (canvas.width !== displayWidth * dpr || canvas.height !== displayHeight * dpr) {
+            canvas.width = displayWidth * dpr;
+            canvas.height = displayHeight * dpr;
+          }
+          
+          const img = new Image();
+          img.onload = () => {
+            // Get fresh context after potential canvas resize
+            const drawCtx = canvas.getContext("2d");
+            if (!drawCtx) return;
+            
+            // Use save/restore pattern like the initialization code
+            drawCtx.save();
+            drawCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            
+            // Draw grid background first
+            drawCtx.fillStyle = "#1a1a2e";
+            drawCtx.fillRect(0, 0, displayWidth, displayHeight);
+            drawCtx.fillStyle = "rgba(255, 255, 255, 0.1)";
+            for (let x = 0; x < displayWidth; x += 20) {
+              for (let y = 0; y < displayHeight; y += 20) {
+                drawCtx.beginPath();
+                drawCtx.arc(x, y, 1, 0, Math.PI * 2);
+                drawCtx.fill();
+              }
+            }
+            
+            // Draw the restored sketch on top
+            drawCtx.drawImage(img, 0, 0, displayWidth, displayHeight);
+            drawCtx.restore();
+          };
+          img.src = originalSketchData;
+        }
+      });
+    }, 100); // Increased timeout to ensure useEffect completes first
+  }, [originalSketchData]);
+
+  // Back to Style Select
+  const handleBackToStyleSelect = useCallback(() => {
+    // Go back to style selection, keep original sketch
+    setPolishedImageData(null);
+    setStage("style-select");
+  }, []);
+
+  // Save Original (from any stage)
+  const handleSaveOriginal = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const dataUrl = originalSketchData || canvas.toDataURL("image/png");
+    onSave(dataUrl, false, motionNotes, animationStyle);
+    handleClose();
+  }, [originalSketchData, onSave, motionNotes, animationStyle]);
+
+  // Save Polished Version
+  const handleSavePolished = useCallback(() => {
+    if (polishedImageData && originalSketchData) {
+      // Pass both polished image and original sketch data
+      onSave(polishedImageData, true, motionNotes, animationStyle, originalSketchData);
+    }
+    handleClose();
+  }, [polishedImageData, originalSketchData, onSave, motionNotes, animationStyle]);
+
+  // Handle Close Properly
+  const handleClose = useCallback(() => {
+    // Reset all polish state when closing
+    setStage("drawing");
+    setOriginalSketchData(null);
+    setPolishedImageData(null);
+    setPolishError(null);
+    onClose();
+  }, [onClose]);
 
   // Handle text submission
   const handleTextSubmit = useCallback(() => {
@@ -645,9 +932,18 @@ export function FrameSketchEditor({
         return;
       }
 
-      if (e.key === "z" && (e.metaKey || e.ctrlKey)) {
+      // Undo: Ctrl+Z or Cmd+Z
+      if (e.key === "z" && (e.metaKey || e.ctrlKey) && !e.shiftKey) {
         e.preventDefault();
         handleUndo();
+      }
+      // Redo: Ctrl+Shift+Z, Cmd+Shift+Z, or Ctrl+Y
+      if (
+        ((e.key === "z" && e.shiftKey) || e.key === "y") &&
+        (e.metaKey || e.ctrlKey)
+      ) {
+        e.preventDefault();
+        handleRedo();
       }
       if (e.key === "1") setSelectedTool("pen");
       if (e.key === "2") setSelectedTool("line");
@@ -662,7 +958,7 @@ export function FrameSketchEditor({
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open, handleUndo, isTextInputActive]);
+  }, [open, handleUndo, handleRedo, isTextInputActive]);
 
   if (!open || !frame) return null;
 
@@ -686,343 +982,562 @@ export function FrameSketchEditor({
             initial={{ scale: 0.95, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
             exit={{ scale: 0.95, opacity: 0 }}
-            className="relative w-full max-w-5xl"
+            className="relative w-full max-w-4xl"
           >
-            <GlassCard className="p-6">
-              {/* Header */}
-              <div className="flex items-center justify-between mb-4">
+            <GlassCard className="max-h-[90vh] flex flex-col overflow-hidden">
+              {/* Header - fixed */}
+              <div className="flex items-center justify-between p-4 border-b border-white/10 flex-shrink-0">
                 <div>
                   <h2 className="font-display font-bold text-xl text-white">
-                    Sketch Editor
+                    {stage === "drawing" && "Sketch Editor"}
+                    {stage === "style-select" && "Choose Style"}
+                    {stage === "polishing" && "Creating Magic..."}
+                    {stage === "preview" && "✨ AI Polish Preview"}
                   </h2>
                   <p className="text-sm text-white/60">
-                    Editing: {frame.title}
+                    {stage === "drawing" && `Editing: ${frame.title}`}
+                    {stage === "style-select" && "Select how you want your sketch transformed"}
+                    {stage === "polishing" && "Gemini is transforming your sketch"}
+                    {stage === "preview" && "Compare and choose which version to save"}
                   </p>
                 </div>
                 <button
-                  onClick={onClose}
+                  onClick={handleClose}
                   className="p-2 rounded-lg hover:bg-white/10 transition-colors"
                 >
                   <X className="w-5 h-5 text-white/60" />
                 </button>
               </div>
 
-              {/* Main Toolbar */}
-              <div className="flex flex-wrap items-center gap-3 mb-4 p-3 rounded-xl bg-white/5">
-                {/* Drawing Tools */}
-                <div className="flex flex-col gap-1">
-                  <span className="text-[10px] text-white/40 uppercase tracking-wider">Tools</span>
-                  <div className="flex items-center gap-1">
-                    {TOOLS.map((tool) => {
-                      const Icon = tool.icon;
-                      const isSelected = selectedTool === tool.id;
-                      return (
-                        <Tooltip key={tool.id}>
-                          <TooltipTrigger asChild>
-                            <button
-                              onClick={() => {
-                                // For image tool, set selected AND open file picker
-                                if (tool.id === "image") {
-                                  setSelectedTool("image");
-                                  fileInputRef.current?.click();
-                                  return;
-                                }
-                                setSelectedTool(tool.id);
-                              }}
-                              className={cn(
-                                "p-2 rounded-lg transition-all",
-                                isSelected
-                                  ? "bg-sm-magenta text-white shadow-glow"
-                                  : "bg-white/10 text-white/70 hover:bg-white/20 hover:text-white"
-                              )}
-                            >
-                              <Icon className="w-4 h-4" />
-                            </button>
-                          </TooltipTrigger>
-                          <TooltipContent>{tool.name}</TooltipContent>
-                        </Tooltip>
-                      );
-                    })}
-                  </div>
-                </div>
+              {/* STAGE 1: DRAWING */}
+              {stage === "drawing" && (
+                // ========== STAGE 1: SKETCH EDITOR ==========
+                <>
+                  {/* Scrollable content */}
+                  <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                    {/* Main Toolbar */}
+                    <div className="flex flex-wrap items-center gap-3 p-3 rounded-xl bg-white/5">
+                    {/* Drawing Tools */}
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[10px] text-white/40 uppercase tracking-wider">Tools</span>
+                      <div className="flex items-center gap-1">
+                        {TOOLS.map((tool) => {
+                          const Icon = tool.icon;
+                          const isSelected = selectedTool === tool.id;
+                          return (
+                            <Tooltip key={tool.id}>
+                              <TooltipTrigger asChild>
+                                <button
+                                  onClick={() => {
+                                    // For image tool, set selected AND open file picker
+                                    if (tool.id === "image") {
+                                      setSelectedTool("image");
+                                      fileInputRef.current?.click();
+                                      return;
+                                    }
+                                    setSelectedTool(tool.id);
+                                  }}
+                                  className={cn(
+                                    "p-2 rounded-lg transition-all",
+                                    isSelected
+                                      ? "bg-sm-magenta text-white shadow-glow"
+                                      : "bg-white/10 text-white/70 hover:bg-white/20 hover:text-white"
+                                  )}
+                                >
+                                  <Icon className="w-4 h-4" />
+                                </button>
+                              </TooltipTrigger>
+                              <TooltipContent>{tool.name}</TooltipContent>
+                            </Tooltip>
+                          );
+                        })}
+                      </div>
+                    </div>
 
-                <div className="w-px h-10 bg-white/20" />
+                    <div className="w-px h-10 bg-white/20" />
 
-                {/* Colors */}
-                <div className="flex flex-col gap-1">
-                  <span className="text-[10px] text-white/40 uppercase tracking-wider">Colors</span>
-                  <div className="flex items-center gap-1 flex-wrap max-w-[180px]">
-                    {COLORS.map((color) => (
-                      <Tooltip key={color.value}>
+                    {/* Colors */}
+                    <div className="flex flex-col gap-1">
+                      <span className="text-[10px] text-white/40 uppercase tracking-wider">Colors</span>
+                      <div className="flex items-center gap-1 flex-wrap max-w-[180px]">
+                        {COLORS.map((color) => (
+                          <Tooltip key={color.value}>
+                            <TooltipTrigger asChild>
+                              <button
+                                onClick={() => {
+                                  setSelectedColor(color.value);
+                                  if (selectedTool === "eraser") {
+                                    setSelectedTool("pen");
+                                  }
+                                }}
+                                className={cn(
+                                  "w-6 h-6 rounded-full border-2 transition-all",
+                                  selectedColor === color.value && selectedTool !== "eraser"
+                                    ? "border-white scale-110 ring-2 ring-white/30"
+                                    : "border-white/30 hover:border-white/60"
+                                )}
+                                style={{ backgroundColor: color.value }}
+                              />
+                            </TooltipTrigger>
+                            <TooltipContent>{color.name}</TooltipContent>
+                          </Tooltip>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="w-px h-10 bg-white/20" />
+
+                    {/* Size + Fill + Sketchy */}
+                    <div className="flex items-center gap-2">
+                      {[
+                        { label: "S", size: 3 },
+                        { label: "M", size: 8 },
+                        { label: "L", size: 16 },
+                      ].map((option) => (
+                        <button
+                          key={option.label}
+                          onClick={() => setBrushSize([option.size])}
+                          className={cn(
+                            "w-7 h-7 rounded-lg text-xs font-bold transition-all",
+                            brushSize[0] === option.size
+                              ? "bg-sm-magenta text-white shadow-glow"
+                              : "bg-white/10 text-white/60 hover:bg-white/20"
+                          )}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                      {/* Fill toggle */}
+                      <button
+                        onClick={() => setFillShapes(!fillShapes)}
+                        className={cn(
+                          "px-2 h-7 rounded-lg text-xs font-medium transition-all flex items-center gap-1",
+                          fillShapes
+                            ? "bg-sm-purple text-white"
+                            : "bg-white/10 text-white/60 hover:bg-white/20"
+                        )}
+                      >
+                        {fillShapes ? <Square className="w-3 h-3 fill-current" /> : <Square className="w-3 h-3" />}
+                        Fill
+                      </button>
+                      {/* Sketchy toggle */}
+                      <button
+                        onClick={() => setSketchyMode(!sketchyMode)}
+                        className={cn(
+                          "px-2 h-7 rounded-lg text-xs font-medium transition-all flex items-center gap-1",
+                          sketchyMode
+                            ? "bg-[#00D9FF] text-white"
+                            : "bg-white/10 text-white/60 hover:bg-white/20"
+                        )}
+                      >
+                        ✏️ Sketchy
+                      </button>
+                    </div>
+
+                    {/* Spacer */}
+                    <div className="flex-1" />
+
+                    {/* Actions */}
+                    <div className="flex items-center gap-2">
+                      <Tooltip>
                         <TooltipTrigger asChild>
                           <button
-                            onClick={() => {
-                              setSelectedColor(color.value);
-                              if (selectedTool === "eraser") {
-                                setSelectedTool("pen");
-                              }
-                            }}
-                            className={cn(
-                              "w-6 h-6 rounded-full border-2 transition-all",
-                              selectedColor === color.value && selectedTool !== "eraser"
-                                ? "border-white scale-110 ring-2 ring-white/30"
-                                : "border-white/30 hover:border-white/60"
-                            )}
-                            style={{ backgroundColor: color.value }}
-                          />
+                            onClick={handleUndo}
+                            disabled={historyIndexRef.current <= 0}
+                            className="bg-white/15 border border-white/30 text-white hover:bg-white/25 px-3 py-1.5 rounded-lg flex items-center gap-1.5 text-sm font-medium disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                          >
+                            <Undo2 className="w-4 h-4" />
+                            Undo
+                          </button>
                         </TooltipTrigger>
-                        <TooltipContent>{color.name}</TooltipContent>
+                        <TooltipContent>Undo (Ctrl+Z)</TooltipContent>
                       </Tooltip>
-                    ))}
+
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            onClick={handleRedo}
+                            disabled={historyIndexRef.current >= history.length - 1}
+                            className="bg-white/15 border border-white/30 text-white hover:bg-white/25 px-3 py-1.5 rounded-lg flex items-center gap-1.5 text-sm font-medium disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                          >
+                            <Redo2 className="w-4 h-4" />
+                            Redo
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>Redo (Ctrl+Y or Ctrl+Shift+Z)</TooltipContent>
+                      </Tooltip>
+
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <button
+                            onClick={clearCanvas}
+                            className="bg-red-500/25 border border-red-400/30 text-red-200 hover:bg-red-500/35 px-3 py-1.5 rounded-lg flex items-center gap-1.5 text-sm font-medium transition-all"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                            Clear
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>Clear All</TooltipContent>
+                      </Tooltip>
+
+                      {/* Hidden file input for image upload */}
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/*"
+                        onChange={handleImageUpload}
+                        className="hidden"
+                      />
+                    </div>
                   </div>
-                </div>
 
-                <div className="w-px h-10 bg-white/20" />
-
-                {/* Size + Fill + Sketchy */}
-                <div className="flex items-center gap-2">
-                  {[
-                    { label: "S", size: 3 },
-                    { label: "M", size: 8 },
-                    { label: "L", size: 16 },
-                  ].map((option) => (
-                    <button
-                      key={option.label}
-                      onClick={() => setBrushSize([option.size])}
-                      className={cn(
-                        "w-7 h-7 rounded-lg text-xs font-bold transition-all",
-                        brushSize[0] === option.size
-                          ? "bg-sm-magenta text-white shadow-glow"
-                          : "bg-white/10 text-white/60 hover:bg-white/20"
-                      )}
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                  {/* Fill toggle */}
-                  <button
-                    onClick={() => setFillShapes(!fillShapes)}
-                    className={cn(
-                      "px-2 h-7 rounded-lg text-xs font-medium transition-all flex items-center gap-1",
-                      fillShapes
-                        ? "bg-sm-purple text-white"
-                        : "bg-white/10 text-white/60 hover:bg-white/20"
-                    )}
-                  >
-                    {fillShapes ? <Square className="w-3 h-3 fill-current" /> : <Square className="w-3 h-3" />}
-                    Fill
-                  </button>
-                  {/* Sketchy toggle */}
-                  <button
-                    onClick={() => setSketchyMode(!sketchyMode)}
-                    className={cn(
-                      "px-2 h-7 rounded-lg text-xs font-medium transition-all flex items-center gap-1",
-                      sketchyMode
-                        ? "bg-[#00D9FF] text-white"
-                        : "bg-white/10 text-white/60 hover:bg-white/20"
-                    )}
-                  >
-                    ✏️ Sketchy
-                  </button>
-                </div>
-
-                {/* Spacer */}
-                <div className="flex-1" />
-
-                {/* Actions */}
-                <div className="flex items-center gap-2">
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        onClick={handleUndo}
-                        disabled={historyIndexRef.current <= 0}
-                        className="bg-white/15 border border-white/30 text-white hover:bg-white/25 px-3 py-1.5 rounded-lg flex items-center gap-1.5 text-sm font-medium disabled:opacity-30 disabled:cursor-not-allowed"
-                      >
-                        <Undo2 className="w-4 h-4" />
-                        Undo
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>Undo (Ctrl+Z)</TooltipContent>
-                  </Tooltip>
-
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <button
-                        onClick={clearCanvas}
-                        className="bg-red-500/25 border border-red-400/30 text-red-200 hover:bg-red-500/35 px-3 py-1.5 rounded-lg flex items-center gap-1.5 text-sm font-medium"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                        Clear
-                      </button>
-                    </TooltipTrigger>
-                    <TooltipContent>Clear All</TooltipContent>
-                  </Tooltip>
-
-                  {/* Hidden file input for image upload */}
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/*"
-                    onChange={handleImageUpload}
-                    className="hidden"
-                  />
-                </div>
-              </div>
-
-              {/* Canvas Container */}
-              <div
-                ref={containerRef}
-                className="relative rounded-xl bg-sm-charcoal/50 mb-4"
-                onMouseMove={handleContainerMouseMove}
-                onMouseLeave={() => setCursorPos(null)}
-              >
-                {/* Main Canvas */}
-                <canvas
-                  ref={canvasRef}
-                  className="w-full block"
-                  style={{ aspectRatio: "16/9", cursor: "none" }}
-                  onMouseDown={startDrawing}
-                  onMouseMove={draw}
-                  onMouseUp={stopDrawing}
-                  onMouseLeave={handleMouseLeave}
-                />
-
-                {/* Preview Canvas (for shape previews) */}
-                <canvas
-                  ref={previewCanvasRef}
-                  className="absolute inset-0 w-full h-full pointer-events-none"
-                  style={{ aspectRatio: "16/9" }}
-                />
-
-                {/* Vignette overlay */}
-                <div 
-                  className="absolute inset-0 pointer-events-none rounded-xl"
-                  style={{
-                    background: "radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.3) 100%)"
-                  }}
-                />
-
-                {/* Active tool indicator */}
-                <div className="absolute bottom-3 left-3 px-2.5 py-1 rounded-md bg-black/50 backdrop-blur-sm">
-                  <span className="text-xs text-white/70 font-medium">
-                    {TOOLS.find(t => t.id === selectedTool)?.name.split(" ")[0]}
-                    {selectedTool !== "pen" && selectedTool !== "eraser" && selectedTool !== "text" && selectedTool !== "image" && fillShapes && " (Filled)"}
-                    {sketchyMode && selectedTool === "pen" && " ✏️"}
-                  </span>
-                </div>
-
-                {/* Zoom indicator */}
-                <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded-md bg-black/50 backdrop-blur-sm">
-                  <span className="text-xs text-white/70 font-mono">100%</span>
-                </div>
-
-                {/* Text input overlay */}
-                {isTextInputActive && textPosition && (
+                  {/* Canvas Container */}
                   <div
-                    className="absolute"
-                    style={{
-                      left: `${(textPosition.x / 640) * 100}%`,
-                      top: `${(textPosition.y / 360) * 100}%`,
-                      zIndex: 9999,
-                    }}
+                    ref={containerRef}
+                    className="relative rounded-xl bg-sm-charcoal/50"
+                    onMouseMove={handleContainerMouseMove}
+                    onMouseLeave={() => setCursorPos(null)}
                   >
-                    <input
-                      type="text"
-                      autoFocus
-                      value={textInput}
-                      onChange={(e) => setTextInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          handleTextSubmit();
-                        } else if (e.key === "Escape") {
-                          setIsTextInputActive(false);
-                          setTextPosition(null);
-                          setTextInput("");
-                        }
-                      }}
-                      onBlur={() => {
-                        if (textInput.trim()) {
-                          handleTextSubmit();
-                        } else {
-                          setIsTextInputActive(false);
-                          setTextPosition(null);
-                        }
-                      }}
-                      placeholder="Type here..."
+                    {/* Main Canvas */}
+                    <canvas
+                      ref={canvasRef}
+                      className="w-full block"
+                      style={{ aspectRatio: "16/9", cursor: "none" }}
+                      onMouseDown={startDrawing}
+                      onMouseMove={draw}
+                      onMouseUp={stopDrawing}
+                      onMouseLeave={handleMouseLeave}
+                    />
+
+                    {/* Preview Canvas (for shape previews) */}
+                    <canvas
+                      ref={previewCanvasRef}
+                      className="absolute inset-0 w-full h-full pointer-events-none"
+                      style={{ aspectRatio: "16/9" }}
+                    />
+
+                    {/* Vignette overlay */}
+                    <div
+                      className="absolute inset-0 pointer-events-none rounded-xl"
                       style={{
-                        fontSize: brushSize[0] === 3 ? 18 : brushSize[0] === 8 ? 28 : 42,
-                        color: selectedColor,
-                        backgroundColor: 'rgba(0, 0, 0, 0.95)',
-                        border: '3px solid #FF3D8F',
-                        borderRadius: '8px',
-                        padding: '8px 12px',
-                        outline: 'none',
-                        minWidth: '200px',
-                        boxShadow: '0 0 30px rgba(255, 61, 143, 0.6), 0 4px 20px rgba(0,0,0,0.5)',
+                        background: "radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.3) 100%)"
                       }}
                     />
-                  </div>
-                )}
 
-                {/* Save confirmation overlay */}
-                <AnimatePresence>
-                  {showSaveConfirmation && (
-                    <motion.div
-                      initial={{ opacity: 0, scale: 0.8 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      exit={{ opacity: 0, scale: 0.8 }}
-                      className="absolute inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm rounded-xl"
-                    >
-                      <div className="bg-sm-mint/20 border border-sm-mint/40 rounded-xl px-6 py-4 flex items-center gap-3">
-                        <Check className="w-8 h-8 text-sm-mint" />
-                        <span className="text-xl font-bold text-white">Saved!</span>
+                    {/* Active tool indicator */}
+                    <div className="absolute bottom-3 left-3 px-2.5 py-1 rounded-md bg-black/50 backdrop-blur-sm">
+                      <span className="text-xs text-white/70 font-medium">
+                        {TOOLS.find(t => t.id === selectedTool)?.name.split(" ")[0]}
+                        {selectedTool !== "pen" && selectedTool !== "eraser" && selectedTool !== "text" && selectedTool !== "image" && fillShapes && " (Filled)"}
+                        {sketchyMode && selectedTool === "pen" && " ✏️"}
+                      </span>
+                    </div>
+
+                    {/* Zoom indicator */}
+                    <div className="absolute bottom-3 right-3 px-2.5 py-1 rounded-md bg-black/50 backdrop-blur-sm">
+                      <span className="text-xs text-white/70 font-mono">100%</span>
+                    </div>
+
+                    {/* Text input overlay */}
+                    {isTextInputActive && textPosition && (
+                      <div
+                        className="absolute"
+                        style={{
+                          left: `${(textPosition.x / 640) * 100}%`,
+                          top: `${(textPosition.y / 360) * 100}%`,
+                          zIndex: 9999,
+                        }}
+                      >
+                        <input
+                          type="text"
+                          autoFocus
+                          value={textInput}
+                          onChange={(e) => setTextInput(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              handleTextSubmit();
+                            } else if (e.key === "Escape") {
+                              setIsTextInputActive(false);
+                              setTextPosition(null);
+                              setTextInput("");
+                            }
+                          }}
+                          onBlur={() => {
+                            if (textInput.trim()) {
+                              handleTextSubmit();
+                            } else {
+                              setIsTextInputActive(false);
+                              setTextPosition(null);
+                            }
+                          }}
+                          placeholder="Type here..."
+                          style={{
+                            fontSize: brushSize[0] === 3 ? 18 : brushSize[0] === 8 ? 28 : 42,
+                            color: selectedColor,
+                            backgroundColor: 'rgba(0, 0, 0, 0.95)',
+                            border: '3px solid #FF3D8F',
+                            borderRadius: '8px',
+                            padding: '8px 12px',
+                            outline: 'none',
+                            minWidth: '200px',
+                            boxShadow: '0 0 30px rgba(255, 61, 143, 0.6), 0 4px 20px rgba(0,0,0,0.5)',
+                          }}
+                        />
                       </div>
-                    </motion.div>
+                    )}
+
+                    {/* Save confirmation overlay */}
+                    <AnimatePresence>
+                      {showSaveConfirmation && (
+                        <motion.div
+                          initial={{ opacity: 0, scale: 0.8 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.8 }}
+                          className="absolute inset-0 flex items-center justify-center bg-black/40 backdrop-blur-sm rounded-xl"
+                        >
+                          <div className="bg-sm-mint/20 border border-sm-mint/40 rounded-xl px-6 py-4 flex items-center gap-3">
+                            <Check className="w-8 h-8 text-sm-mint" />
+                            <span className="text-xl font-bold text-white">Saved!</span>
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+
+                    {/* Cursor Preview */}
+                    {cursorPos && (
+                      <div
+                        className="absolute pointer-events-none rounded-full border-2 border-white/60"
+                        style={{
+                          left: `${(cursorPos.x / 640) * 100}%`,
+                          top: `${(cursorPos.y / 360) * 100}%`,
+                          width: brushSize[0] * (containerRef.current?.offsetWidth || 640) / 640,
+                          height: brushSize[0] * (containerRef.current?.offsetWidth || 640) / 640,
+                          transform: "translate(-50%, -50%)",
+                          backgroundColor:
+                            selectedTool === "eraser"
+                              ? "rgba(26, 26, 46, 0.5)"
+                              : `${selectedColor}40`,
+                        }}
+                      />
+                    )}
+                  </div>
+
+                  {/* Motion Notes Section - compact */}
+                  <div className="grid grid-cols-1 md:grid-cols-[1fr_auto_auto] gap-3 items-end p-3 rounded-xl bg-white/5">
+                    <div>
+                      <label className="text-xs text-white/60 block mb-1">Motion Notes</label>
+                      <Textarea
+                        value={motionNotes}
+                        onChange={(e) => setMotionNotes(e.target.value)}
+                        placeholder="Camera movement, action, mood..."
+                        className="bg-white/10 border-white/20 text-white text-sm min-h-[50px] max-h-[80px] placeholder:text-white/30"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-white/60 block mb-1">Animation</label>
+                      <select
+                        value={animationStyle}
+                        onChange={(e) => setAnimationStyle(e.target.value as AnimationStyle)}
+                        className="h-[50px] px-3 rounded-lg bg-white/10 border border-white/20 text-white text-sm min-w-[140px] focus:outline-none focus:ring-2 focus:ring-sm-magenta/50"
+                      >
+                        <option value="static" className="bg-sm-charcoal">Static</option>
+                        <option value="zoom-in" className="bg-sm-charcoal">Zoom In</option>
+                        <option value="zoom-out" className="bg-sm-charcoal">Zoom Out</option>
+                        <option value="pan-left" className="bg-sm-charcoal">Pan Left</option>
+                        <option value="pan-right" className="bg-sm-charcoal">Pan Right</option>
+                        <option value="parallax" className="bg-sm-charcoal">Parallax</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-white/60 block mb-1">Duration</label>
+                      <input
+                        type="number"
+                        value={duration}
+                        onChange={(e) => setDuration(Number(e.target.value))}
+                        min={0.5}
+                        max={10}
+                        step={0.5}
+                        className="h-[50px] w-20 px-3 rounded-lg bg-white/10 border border-white/20 text-white text-sm text-center focus:outline-none focus:ring-2 focus:ring-sm-magenta/50"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Error display */}
+                  {polishError && (
+                    <div className="p-3 rounded-lg bg-red-500/20 border border-red-500/30">
+                      <p className="text-red-200 text-sm">⚠️ {polishError}</p>
+                    </div>
                   )}
-                </AnimatePresence>
-
-                {/* Cursor Preview */}
-                {cursorPos && (
-                  <div
-                    className="absolute pointer-events-none rounded-full border-2 border-white/60"
-                    style={{
-                      left: `${(cursorPos.x / 640) * 100}%`,
-                      top: `${(cursorPos.y / 360) * 100}%`,
-                      width: brushSize[0] * (containerRef.current?.offsetWidth || 640) / 640,
-                      height: brushSize[0] * (containerRef.current?.offsetWidth || 640) / 640,
-                      transform: "translate(-50%, -50%)",
-                      backgroundColor:
-                        selectedTool === "eraser"
-                          ? "rgba(26, 26, 46, 0.5)"
-                          : `${selectedColor}40`,
-                    }}
-                  />
-                )}
-              </div>
-
-              {/* Bottom Actions */}
-              <div className="flex justify-between items-center">
-                <p className="text-xs text-white/40">
-                  Keys: 1-6 tools, T text, I image, F fill, S sketchy, Ctrl+Z undo
-                </p>
-                <div className="flex gap-3">
-                  <Button
-                    variant="ghost"
-                    onClick={onClose}
-                    className="text-white/70 hover:text-white hover:bg-white/10"
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    onClick={handleSave}
-                    className="bg-sm-magenta hover:bg-sm-magenta/90 text-white font-semibold shadow-glow"
-                  >
-                    <Check className="w-4 h-4 mr-2" />
-                    Save Sketch
-                  </Button>
                 </div>
-              </div>
+
+                {/* Footer - NO GENERIC ICONS */}
+                <div className="flex items-center justify-between p-4 border-t border-white/10 flex-shrink-0 bg-black/20">
+                  <p className="text-xs text-white/40 hidden sm:block">
+                    Keys: 1-6 tools, T text, F fill
+                  </p>
+                  <div className="flex gap-3 ml-auto">
+                    <button
+                      onClick={handleClose}
+                      className="px-4 py-2 rounded-lg text-white/60 hover:text-white hover:bg-white/5 transition-colors text-sm font-medium"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleSaveOriginal}
+                      className="px-5 py-2 rounded-lg bg-white/10 hover:bg-white/15 text-white/80 hover:text-white transition-all text-sm font-medium border border-white/10"
+                    >
+                      Save Draft
+                    </button>
+                    <button
+                      onClick={handleStartPolish}
+                      className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-violet-500 to-fuchsia-500 hover:from-violet-400 hover:to-fuchsia-400 text-white font-semibold shadow-lg shadow-violet-500/25 hover:shadow-violet-500/40 transition-all text-sm"
+                    >
+                      Polish with AI ✨
+                    </button>
+                  </div>
+                </div>
+              </>
+              )}
+
+              {/* STAGE 2: STYLE SELECTION */}
+              {stage === "style-select" && (
+                <>
+                  <div className="flex-1 overflow-y-auto p-6">
+                    {/* Preview of original sketch */}
+                    <div className="mb-6">
+                      <p className="text-xs text-white/50 uppercase tracking-wider mb-2">Your Sketch</p>
+                      <div className="aspect-video max-w-sm mx-auto rounded-xl overflow-hidden border border-white/10 bg-sm-charcoal">
+                        {originalSketchData && (
+                          <img src={originalSketchData} alt="Your sketch" className="w-full h-full object-contain" />
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Style Grid */}
+                    <p className="text-xs text-white/50 uppercase tracking-wider mb-3">Choose Output Style</p>
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                      {POLISH_STYLES.map((style) => (
+                        <button
+                          key={style.id}
+                          onClick={() => setSelectedStyle(style.id)}
+                          className={cn(
+                            "p-4 rounded-xl text-left transition-all",
+                            selectedStyle === style.id
+                              ? "bg-gradient-to-br from-violet-500/20 to-fuchsia-500/20 border-2 border-violet-400 shadow-lg shadow-violet-500/10"
+                              : "bg-white/5 border border-white/10 hover:bg-white/10 hover:border-white/20"
+                          )}
+                        >
+                          <span className="font-medium text-white text-sm">{style.label}</span>
+                          <p className="text-xs text-white/50 mt-1">{style.description}</p>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Footer */}
+                  <div className="flex items-center justify-between p-4 border-t border-white/10 flex-shrink-0 bg-black/20">
+                    <button
+                      onClick={handleBackToDrawing}
+                      className="px-4 py-2 rounded-lg text-white/60 hover:text-white hover:bg-white/5 transition-colors text-sm font-medium"
+                    >
+                      ← Back to Drawing
+                    </button>
+                    <button
+                      onClick={handleExecutePolish}
+                      className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-violet-500 to-fuchsia-500 hover:from-violet-400 hover:to-fuchsia-400 text-white font-semibold shadow-lg shadow-violet-500/25 hover:shadow-violet-500/40 transition-all text-sm"
+                    >
+                      Generate {POLISH_STYLES.find(s => s.id === selectedStyle)?.label} ✨
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {/* STAGE 3: POLISHING (Loading) */}
+              {stage === "polishing" && (
+                <div className="flex-1 flex flex-col items-center justify-center p-8">
+                  <div className="relative mb-6">
+                    <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center">
+                      <Wand2 className="w-8 h-8 text-white animate-pulse" />
+                    </div>
+                    <div className="absolute inset-0 rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-500 blur-xl opacity-50 animate-pulse" />
+                  </div>
+                  <h3 className="text-xl font-semibold text-white mb-2">Transforming Your Sketch</h3>
+                  <p className="text-white/60 text-sm mb-4">
+                    Creating {POLISH_STYLES.find(s => s.id === selectedStyle)?.label} style...
+                  </p>
+                  <div className="w-48 h-1 bg-white/10 rounded-full overflow-hidden">
+                    <div className="h-full bg-gradient-to-r from-violet-500 to-fuchsia-500 animate-loading"
+                         style={{ width: "60%" }} />
+                  </div>
+                </div>
+              )}
+
+              {/* STAGE 4: PREVIEW */}
+              {stage === "preview" && (
+                <>
+                  <div className="flex-1 overflow-y-auto p-6">
+                    <div className="grid grid-cols-2 gap-6 mb-6">
+                      {/* Original */}
+                      <div className="space-y-3">
+                        <p className="text-center text-sm font-medium text-white/70">Your Sketch</p>
+                        <div className="aspect-video rounded-xl overflow-hidden border border-white/20 bg-sm-charcoal">
+                          {originalSketchData && (
+                            <img src={originalSketchData} alt="Original" className="w-full h-full object-contain" />
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Polished */}
+                      <div className="space-y-3">
+                        <p className="text-center text-sm font-medium text-emerald-400">
+                          AI {POLISH_STYLES.find(s => s.id === selectedStyle)?.label}
+                        </p>
+                        <div className="aspect-video rounded-xl overflow-hidden border-2 border-emerald-400/50 bg-sm-charcoal shadow-lg shadow-emerald-500/10">
+                          {polishedImageData && (
+                            <img src={polishedImageData} alt="Polished" className="w-full h-full object-contain" />
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Transformation indicator */}
+                    <div className="flex justify-center">
+                      <div className="inline-flex items-center gap-3 px-4 py-2 rounded-full bg-white/5 border border-white/10">
+                        <span className="text-xs text-white/50">Rough Sketch</span>
+                        <span className="text-emerald-400">→</span>
+                        <span className="text-xs text-emerald-400 font-medium">
+                          {POLISH_STYLES.find(s => s.id === selectedStyle)?.label}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Footer */}
+                  <div className="flex items-center justify-between p-4 border-t border-white/10 flex-shrink-0 bg-black/20">
+                    <button
+                      onClick={handleBackToStyleSelect}
+                      className="px-4 py-2 rounded-lg text-white/60 hover:text-white hover:bg-white/5 transition-colors text-sm font-medium"
+                    >
+                      ← Try Different Style
+                    </button>
+                    <div className="flex gap-3">
+                      <button
+                        onClick={handleSaveOriginal}
+                        className="px-5 py-2 rounded-lg bg-white/10 hover:bg-white/15 text-white/80 hover:text-white transition-all text-sm font-medium border border-white/10"
+                      >
+                        Keep Original
+                      </button>
+                      <button
+                        onClick={handleSavePolished}
+                        className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-white font-semibold shadow-lg shadow-emerald-500/25 hover:shadow-emerald-500/40 transition-all text-sm"
+                      >
+                        Use Polished Version ✓
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
             </GlassCard>
           </motion.div>
         </motion.div>
