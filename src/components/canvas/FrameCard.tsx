@@ -83,7 +83,6 @@ export function FrameCard({
   return (
     <motion.div
       className="absolute"
-      style={{ x: position.x, y: position.y }}
       drag
       dragMomentum={false}
       onDrag={(_, info: PanInfo) => {
@@ -93,10 +92,16 @@ export function FrameCard({
           dy: info.delta.y / zoom,
         });
       }}
-      initial={{ opacity: 0, scale: 0.8 }}
-      animate={{ opacity: 1, scale: 1 }}
+      initial={{ opacity: 0, scale: 0.8, x: position.x, y: position.y }}
+      animate={{ opacity: 1, scale: 1, x: position.x, y: position.y }}
       exit={{ opacity: 0, scale: 0.8 }}
       whileHover={{ scale: 1.02 }}
+      transition={{
+        x: { type: "spring", stiffness: 300, damping: 30 },
+        y: { type: "spring", stiffness: 300, damping: 30 },
+        opacity: { duration: 0.2 },
+        scale: { duration: 0.2 }
+      }}
     >
       <div
         className={cn(

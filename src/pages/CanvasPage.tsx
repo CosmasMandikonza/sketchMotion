@@ -825,6 +825,16 @@ export function CanvasPage() {
   const handleAutoArrange = useCallback(async () => {
     if (frames.length < 2) return;
 
+    // CRITICAL: Clear all pending drag state FIRST to prevent stale positions
+    // This fixes the bug where connections point to empty space after auto-arrange
+    // because dragPositions had priority over the new calculated positions
+    setDragPositions(new Map());
+    workingPositionsRef.current.clear();
+
+    // Cancel all pending save timeouts
+    saveTimeoutRef.current.forEach(timeout => clearTimeout(timeout));
+    saveTimeoutRef.current.clear();
+
     // Layout constants
     const frameWidth = 220;
     const frameHeight = 180;
